@@ -98,6 +98,10 @@ func runChecks() throws {
     let microphoneGuidance = AudioPermissions.microphoneResetGuidance(bundleID: "com.example.stt")
     try check(microphoneGuidance.contains("tccutil reset Microphone com.example.stt"), "microphone guidance includes reset command")
 
+    let fallbackGuidance = SystemAudioRecorderError.fallbackConfigurationGuidance()
+    try check(fallbackGuidance.contains("stt devices"), "system fallback guidance includes devices command")
+    try check(fallbackGuidance.contains("--fail-if-empty"), "system fallback guidance includes fail-if-empty")
+
     let unavailableTap = NativeTapAvailability(
         osVersionSupported: true,
         createProcessTapSymbolAvailable: false,

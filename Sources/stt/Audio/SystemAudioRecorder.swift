@@ -53,8 +53,20 @@ public enum SystemAudioRecorderError: Error, LocalizedError {
         case .tapUnavailable(let reason):
             return "Native system-audio capture unavailable: \(reason)"
         case .noFallbackDeviceConfigured:
-            return "No fallback input device (e.g. BlackHole) configured or found for system-audio capture."
+            return Self.fallbackConfigurationGuidance()
         }
+    }
+
+    public static func fallbackConfigurationGuidance() -> String {
+        """
+        No fallback input device configured or found for system-audio capture.
+        Native CoreAudio process-tap capture is not wired yet, so system mode currently needs a routed virtual/aggregate input device.
+        Try:
+          1. Install/configure BlackHole or an Aggregate Device.
+          2. Confirm it appears in `stt devices`.
+          3. Record with: stt record --mode system --input-device "BlackHole 2ch" --fail-if-empty --output system.wav
+          4. Validate routed audio with: STT_SYSTEM_DEVICE="BlackHole 2ch" ./scripts/validate.sh
+        """
     }
 }
 

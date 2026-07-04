@@ -4,6 +4,15 @@ import Testing
 @Suite("SystemAudioRecorder")
 struct SystemAudioRecorderTests {
 
+    @Test func noFallbackDeviceGuidanceIsActionable() {
+        let guidance = SystemAudioRecorderError.fallbackConfigurationGuidance()
+
+        #expect(guidance.contains("stt devices"))
+        #expect(guidance.contains("stt record --mode system --input-device"))
+        #expect(guidance.contains("--fail-if-empty"))
+        #expect(guidance.contains("STT_SYSTEM_DEVICE=\"BlackHole 2ch\" ./scripts/validate.sh"))
+    }
+
     @Test func nativeTapAvailabilityRequiresOSAndSymbols() {
         let available = NativeTapAvailability(
             osVersionSupported: true,
