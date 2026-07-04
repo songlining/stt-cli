@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: macos-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Show toolchain versions
+        run: |
+          swift --version
+          python3 --version
+
+      - name: Bootstrap Python backend without MLX
+        run: ./scripts/bootstrap-python-backend.sh
+
+      - name: Run hardware-free validation
+        env:
+          STT_SKIP_MIC_HARDWARE: "1"
+        run: ./scripts/validate.sh

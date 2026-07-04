@@ -9,6 +9,8 @@ REPO_ROOT="${SCRIPT_DIR:h}"
 SMOKE_DIR="${SMOKE_DIR:-/tmp/stt-smoke-validate}"
 APP_BIN="${REPO_ROOT}/dist/stt.app/Contents/MacOS/stt"
 MIC_WAV="${SMOKE_DIR}/mic.wav"
+FIXTURE_WAV="${SMOKE_DIR}/fixture.wav"
+SKIP_MIC_HARDWARE="${STT_SKIP_MIC_HARDWARE:-0}"
 
 source "${REPO_ROOT}/scripts/lib/bundle-check.sh"
 source "${REPO_ROOT}/scripts/lib/system-fallback-check.sh"
@@ -205,38 +207,44 @@ if [[ -n "${INVALID_BACKEND_METADATA}" ]]; then
   exit 1
 fi
 
-print "== Finite mic smoke test =="
-mkdir -p "${SMOKE_DIR}"
-"${APP_BIN}" record --mode mic --duration 2 --fail-if-empty --output "${MIC_WAV}"
-ls -lh "${MIC_WAV}"
-ffprobe -v error -show_entries format=duration,size -of default=nw=1 "${MIC_WAV}"
-assert_audio_file_has_payload "${MIC_WAV}" "mic smoke test" "Check microphone permission and selected input device."
-
-run_optional_system_fallback_smoke \
-  "${APP_BIN}" \
-  "${SMOKE_DIR}" \
-  "Optional system fallback smoke test" \
-  "Check that ${STT_SYSTEM_DEVICE:-the selected device} is receiving routed system audio before running this optional check."
-
-print "== Meeting recording missing-device smoke test =="
 MEETING_MISSING_DEVICE="definitely-missing-stt-meeting-device"
-MEETING_MISSING_DIR="${SMOKE_DIR}/meeting-missing-device-$(date +%Y%m%d%H%M%S)"
-mkdir -p "${MEETING_MISSING_DIR}"
-set +e
-"${APP_BIN}" record --mode meeting --input-device "${MEETING_MISSING_DEVICE}" --duration 1 --output-dir "${MEETING_MISSING_DIR}/recording" >"${MEETING_MISSING_DIR}/stdout.txt" 2>"${MEETING_MISSING_DIR}/stderr.txt"
-MEETING_MISSING_EXIT=$?
-set -e
-if [[ ${MEETING_MISSING_EXIT} -eq 0 ]]; then
-  print -u2 "error: meeting recording succeeded despite missing system fallback device"
-  head -80 "${MEETING_MISSING_DIR}/stdout.txt" >&2 || true
-  head -80 "${MEETING_MISSING_DIR}/stderr.txt" >&2 || true
-  exit 1
-fi
-if ! grep -q "No input device found matching \"${MEETING_MISSING_DEVICE}\"" "${MEETING_MISSING_DIR}/stderr.txt" "${MEETING_MISSING_DIR}/stdout.txt"; then
-  print -u2 "error: meeting missing-device output did not include expected device guidance"
-  head -80 "${MEETING_MISSING_DIR}/stdout.txt" >&2 || true
-  head -80 "${MEETING_MISSING_DIR}/stderr.txt" >&2 || true
-  exit 1
+if [[ "${SKIP_MIC_HARDWARE}" == "1" ]]; then
+  print "== Finite mic smoke test skipped (STT_SKIP_MIC_HARDWARE=1) =="
+  print "== Optional system fallback smoke test skipped (STT_SKIP_MIC_HARDWARE=1) =="
+  print "== Meeting recording missing-device smoke test skipped (STT_SKIP_MIC_HARDWARE=1) =="
+else
+  print "== Finite mic smoke test =="
+  mkdir -p "${SMOKE_DIR}"
+  "${APP_BIN}" record --mode mic --duration 2 --fail-if-empty --output "${MIC_WAV}"
+  ls -lh "${MIC_WAV}"
+  ffprobe -v error -show_entries format=duration,size -of default=nw=1 "${MIC_WAV}"
+  assert_audio_file_has_payload "${MIC_WAV}" "mic smoke test" "Check microphone permission and selected input device."
+
+  run_optional_system_fallback_smoke \
+    "${APP_BIN}" \
+    "${SMOKE_DIR}" \
+    "Optional system fallback smoke test" \
+    "Check that ${STT_SYSTEM_DEVICE:-the selected device} is receiving routed system audio before running this optional check."
+
+  print "== Meeting recording missing-device smoke test =="
+  MEETING_MISSING_DIR="${SMOKE_DIR}/meeting-missing-device-$(date +%Y%m%d%H%M%S)"
+  mkdir -p "${MEETING_MISSING_DIR}"
+  set +e
+  "${APP_BIN}" record --mode meeting --input-device "${MEETING_MISSING_DEVICE}" --duration 1 --output-dir "${MEETING_MISSING_DIR}/recording" >"${MEETING_MISSING_DIR}/stdout.txt" 2>"${MEETING_MISSING_DIR}/stderr.txt"
+  MEETING_MISSING_EXIT=$?
+  set -e
+  if [[ ${MEETING_MISSING_EXIT} -eq 0 ]]; then
+    print -u2 "error: meeting recording succeeded despite missing system fallback device"
+    head -80 "${MEETING_MISSING_DIR}/stdout.txt" >&2 || true
+    head -80 "${MEETING_MISSING_DIR}/stderr.txt" >&2 || true
+    exit 1
+  fi
+  if ! grep -q "No input device found matching \"${MEETING_MISSING_DEVICE}\"" "${MEETING_MISSING_DIR}/stderr.txt" "${MEETING_MISSING_DIR}/stdout.txt"; then
+    print -u2 "error: meeting missing-device output did not include expected device guidance"
+    head -80 "${MEETING_MISSING_DIR}/stdout.txt" >&2 || true
+    head -80 "${MEETING_MISSING_DIR}/stderr.txt" >&2 || true
+    exit 1
+  fi
 fi
 
 print "== Standalone WAV mix smoke test =="
@@ -287,6 +295,27 @@ if any(actual[3:]):
     raise SystemExit("expected trailing mixed samples to be silence")
 PY
 
+print "== Synthetic WAV fixture for non-capture tests =="
+python3 - "${FIXTURE_WAV}" <<'PY'
+import math
+import struct
+import sys
+import wave
+from pathlib import Path
+
+path = Path(sys.argv[1])
+path.parent.mkdir(parents=True, exist_ok=True)
+sample_rate = 8000
+samples = [int(1000 * math.sin(2 * math.pi * 440 * i / sample_rate)) for i in range(sample_rate // 2)]
+with wave.open(str(path), "wb") as wav:
+    wav.setnchannels(1)
+    wav.setsampwidth(2)
+    wav.setframerate(sample_rate)
+    wav.writeframes(b"".join(struct.pack("<h", sample) for sample in samples))
+PY
+ffprobe -v error -show_entries format=duration,size -of default=nw=1 "${FIXTURE_WAV}"
+assert_audio_file_has_payload "${FIXTURE_WAV}" "synthetic WAV fixture" "The generated fixture should contain PCM audio samples."
+
 validate_metadata() {
   local metadata_path="$1"
   python3 -m json.tool "${metadata_path}" >/dev/null
@@ -306,29 +335,33 @@ if not payload["outputPaths"]:
 PY
 }
 
-print "== Pipeline metadata smoke test =="
-PIPE_HOME="${SMOKE_DIR}/pipeline-home-$(date +%Y%m%d%H%M%S)"
-mkdir -p "${PIPE_HOME}"
-set +e
-STT_HOME="${PIPE_HOME}" "${APP_BIN}" pipeline --mode mic --name smoke --duration 1 --fail-if-empty --transcribe-timeout 5 --device cpu >"${PIPE_HOME}/stdout.txt" 2>"${PIPE_HOME}/stderr.txt"
-PIPE_STATUS=$?
-set -e
-if [[ ${PIPE_STATUS} -eq 0 ]]; then
-  print "Pipeline completed successfully."
+if [[ "${SKIP_MIC_HARDWARE}" == "1" ]]; then
+  print "== Pipeline metadata smoke test skipped (STT_SKIP_MIC_HARDWARE=1) =="
 else
-  print "Pipeline exited ${PIPE_STATUS} after recording; this is acceptable when the local MLX backend is not installed."
+  print "== Pipeline metadata smoke test =="
+  PIPE_HOME="${SMOKE_DIR}/pipeline-home-$(date +%Y%m%d%H%M%S)"
+  mkdir -p "${PIPE_HOME}"
+  set +e
+  STT_HOME="${PIPE_HOME}" "${APP_BIN}" pipeline --mode mic --name smoke --duration 1 --fail-if-empty --transcribe-timeout 5 --device cpu >"${PIPE_HOME}/stdout.txt" 2>"${PIPE_HOME}/stderr.txt"
+  PIPE_STATUS=$?
+  set -e
+  if [[ ${PIPE_STATUS} -eq 0 ]]; then
+    print "Pipeline completed successfully."
+  else
+    print "Pipeline exited ${PIPE_STATUS} after recording; this is acceptable when the local MLX backend is not installed."
+  fi
+  METADATA_PATH="$(find "${PIPE_HOME}" -maxdepth 4 -name metadata.json -type f | head -1)"
+  if [[ -z "${METADATA_PATH}" ]]; then
+    print -u2 "error: pipeline metadata.json was not written"
+    print -u2 "stdout:"
+    head -80 "${PIPE_HOME}/stdout.txt" >&2 || true
+    print -u2 "stderr:"
+    head -80 "${PIPE_HOME}/stderr.txt" >&2 || true
+    exit 1
+  fi
+  validate_metadata "${METADATA_PATH}"
+  print "Pipeline metadata: ${METADATA_PATH}"
 fi
-METADATA_PATH="$(find "${PIPE_HOME}" -maxdepth 4 -name metadata.json -type f | head -1)"
-if [[ -z "${METADATA_PATH}" ]]; then
-  print -u2 "error: pipeline metadata.json was not written"
-  print -u2 "stdout:"
-  head -80 "${PIPE_HOME}/stdout.txt" >&2 || true
-  print -u2 "stderr:"
-  head -80 "${PIPE_HOME}/stderr.txt" >&2 || true
-  exit 1
-fi
-validate_metadata "${METADATA_PATH}"
-print "Pipeline metadata: ${METADATA_PATH}"
 
 print "== Fake backend smoke tests =="
 FAKE_BACKEND="${SMOKE_DIR}/fake-backend"
@@ -370,7 +403,7 @@ PY
 print "== Standalone transcribe smoke test with fake backend =="
 FAKE_TRANSCRIBE_DIR="${SMOKE_DIR}/transcribe-success-$(date +%Y%m%d%H%M%S)"
 mkdir -p "${FAKE_TRANSCRIBE_DIR}"
-"${APP_BIN}" transcribe "${MIC_WAV}" \
+"${APP_BIN}" transcribe "${FIXTURE_WAV}" \
   --output "${FAKE_TRANSCRIBE_DIR}/transcript.txt" \
   --json "${FAKE_TRANSCRIBE_DIR}/transcript.json" \
   --device cpu \
@@ -381,8 +414,11 @@ python3 -m json.tool "${FAKE_TRANSCRIBE_DIR}/transcript.json" >/dev/null
 grep -q "fake transcript" "${FAKE_TRANSCRIBE_DIR}/transcript.txt"
 grep -q "fake transcript" "${FAKE_TRANSCRIBE_DIR}/stdout.txt"
 
-print "== Successful pipeline smoke test with fake backend =="
-FAKE_PIPE_HOME="${SMOKE_DIR}/pipeline-success-home-$(date +%Y%m%d%H%M%S)"
+if [[ "${SKIP_MIC_HARDWARE}" == "1" ]]; then
+  print "== Fake-backend pipeline smoke tests skipped (STT_SKIP_MIC_HARDWARE=1) =="
+else
+  print "== Successful pipeline smoke test with fake backend =="
+  FAKE_PIPE_HOME="${SMOKE_DIR}/pipeline-success-home-$(date +%Y%m%d%H%M%S)"
 mkdir -p "${FAKE_PIPE_HOME}"
 STT_HOME="${FAKE_PIPE_HOME}" "${APP_BIN}" pipeline --mode mic --name success --duration 1 --fail-if-empty --transcribe-timeout 5 --device cpu --python-backend "${FAKE_BACKEND}" >"${FAKE_PIPE_HOME}/stdout.txt" 2>"${FAKE_PIPE_HOME}/stderr.txt"
 FAKE_METADATA_PATH="$(find "${FAKE_PIPE_HOME}" -maxdepth 4 -name metadata.json -type f | head -1)"
@@ -561,5 +597,6 @@ if "--timeout/--transcribe-timeout" not in notes:
     raise SystemExit(f"expected timeout recovery guidance in notes, got: {notes!r}")
 PY
 print "Timeout fake-backend pipeline metadata: ${TIMEOUT_METADATA_PATH} (${TIMEOUT_ELAPSED}s)"
+fi
 
 print "Validation complete. Smoke artifacts: ${SMOKE_DIR}"

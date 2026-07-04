@@ -42,19 +42,28 @@ This runs:
 - Static app-bundle TCC metadata and entitlement checks, including custom `BUNDLE_ID` override coverage
 - Bundled `doctor`
 - Codesign verification
-- Finite mic recording smoke test
+- Finite mic recording smoke test (unless `STT_SKIP_MIC_HARDWARE=1`)
 - Optional system fallback smoke test when `STT_SYSTEM_DEVICE` is set
-- Pipeline metadata smoke test
+- Meeting missing-device smoke test (unless `STT_SKIP_MIC_HARDWARE=1`)
+- Pipeline metadata smoke test (unless `STT_SKIP_MIC_HARDWARE=1`)
 - Standalone WAV mix smoke test
-- Standalone transcribe smoke test with a generated fake backend
-- Successful pipeline smoke test with a generated fake backend
-- Failing pipeline smoke test with a generated fake backend
+- Standalone transcribe smoke test with a generated fake backend and synthetic WAV fixture
+- Invalid `--python-backend` preflight smoke tests
+- Successful/failing/timeout pipeline smoke tests with generated fake backends (unless `STT_SKIP_MIC_HARDWARE=1`)
 
 By default validation allows the transcription backend to be missing MLX dependencies, so recording and metadata checks still run on a fresh machine. To require full backend readiness:
 
 ```bash
 STT_REQUIRE_BACKEND_READY=1 ./scripts/validate.sh
 ```
+
+For CI or other non-interactive environments without microphone/TCC access, run the hardware-free subset:
+
+```bash
+STT_SKIP_MIC_HARDWARE=1 ./scripts/validate.sh
+```
+
+This still runs build/test, Python tests, app-bundle checks, backend readiness checks, synthetic WAV/fake-backend transcribe checks, invalid-backend preflight checks, and static/deterministic validation. It intentionally skips real microphone capture and pipeline paths that would open the microphone.
 
 To validate a routed virtual/aggregate system-audio device, first route audio into the device, then run:
 
@@ -63,6 +72,17 @@ STT_SYSTEM_DEVICE="BlackHole 2ch" ./scripts/validate.sh
 ```
 
 The optional check fails if the system fallback output is header-only/suspiciously small.
+
+## Continuous integration
+
+GitHub Actions runs `.github/workflows/ci.yml` on macOS with:
+
+```bash
+./scripts/bootstrap-python-backend.sh
+STT_SKIP_MIC_HARDWARE=1 ./scripts/validate.sh
+```
+
+CI intentionally does not install MLX, reset TCC, open the microphone, validate BlackHole/system routing, or exercise native CoreAudio process-tap capture. Run the full local validation and manual TCC/system-audio smoke tests before relying on hardware-specific behavior.
 
 ## Build app bundle
 
