@@ -92,6 +92,34 @@ func runChecks() throws {
     )
     try checkEqual(mixedWAV.samples, [32_767, -32_768, 123], "WAV mixer clips and pads")
 
+    let meetingMixDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: meetingMixDir) }
+    try FileManager.default.createDirectory(at: meetingMixDir, withIntermediateDirectories: true)
+    let meetingMicURL = meetingMixDir.appendingPathComponent("mic.wav")
+    let meetingSystemURL = meetingMixDir.appendingPathComponent("system.wav")
+    let meetingMixedURL = meetingMixDir.appendingPathComponent("mixed.wav")
+    try WAVPCMFile(sampleRate: 8_000, samples: [1_000, 2_000]).encodedData().write(to: meetingMicURL)
+    try WAVPCMFile(sampleRate: 8_000, samples: [3_000]).encodedData().write(to: meetingSystemURL)
+    let meetingSelection = Pipeline.resolveMeetingAudioSource(micURL: meetingMicURL, systemURL: meetingSystemURL, mixedURL: meetingMixedURL)
+    try checkEqual(meetingSelection.audioToTranscribeURL, meetingMixedURL, "meeting pipeline selects mixed track")
+    try checkEqual(meetingSelection.outputURLs, [meetingMicURL, meetingSystemURL, meetingMixedURL], "meeting pipeline records mixed output path")
+    try check(meetingSelection.note == nil, "meeting pipeline has no mix note on success")
+    try check(FileManager.default.fileExists(atPath: meetingMixedURL.path), "meeting pipeline writes mixed track")
+
+    let meetingFallbackDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: meetingFallbackDir) }
+    try FileManager.default.createDirectory(at: meetingFallbackDir, withIntermediateDirectories: true)
+    let fallbackMicURL = meetingFallbackDir.appendingPathComponent("mic.wav")
+    let fallbackSystemURL = meetingFallbackDir.appendingPathComponent("system.wav")
+    let fallbackMixedURL = meetingFallbackDir.appendingPathComponent("mixed.wav")
+    try WAVPCMFile(sampleRate: 16_000, samples: [1]).encodedData().write(to: fallbackMicURL)
+    try WAVPCMFile(sampleRate: 44_100, samples: [1]).encodedData().write(to: fallbackSystemURL)
+    let fallbackSelection = Pipeline.resolveMeetingAudioSource(micURL: fallbackMicURL, systemURL: fallbackSystemURL, mixedURL: fallbackMixedURL)
+    try checkEqual(fallbackSelection.audioToTranscribeURL, fallbackMicURL, "meeting pipeline falls back to mic track")
+    try checkEqual(fallbackSelection.outputURLs, [fallbackMicURL, fallbackSystemURL], "meeting pipeline fallback output paths")
+    try check(fallbackSelection.note?.contains("Mixed track unavailable") == true, "meeting pipeline fallback note explains mix failure")
+    try check(fallbackSelection.note?.contains("transcribing mic.wav instead") == true, "meeting pipeline fallback note explains mic transcription")
+
     let headerOnlyRecording = RecordingResult(
         outputURL: URL(fileURLWithPath: "/tmp/header-only.wav"),
         durationSeconds: 1,

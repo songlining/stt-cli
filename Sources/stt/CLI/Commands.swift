@@ -530,12 +530,13 @@ public struct Pipeline: ParsableCommand {
         let recordingMode = RecordingMode(rawValue: mode.rawValue) ?? .mic
         let transcriptTextURL = runDir.appendingPathComponent("\(name).txt")
         let transcriptJSONURL = runDir.appendingPathComponent("\(name).json")
-        let outputURLs: [URL]
-        let audioToTranscribeURL: URL
+        let micURL = runDir.appendingPathComponent("mic.wav")
+        let systemURL = runDir.appendingPathComponent("system.wav")
+        let mixedURL = runDir.appendingPathComponent("mixed.wav")
+        var outputURLs: [URL]
+        var audioToTranscribeURL: URL
 
         if mode == .meeting {
-            let micURL = runDir.appendingPathComponent("mic.wav")
-            let systemURL = runDir.appendingPathComponent("system.wav")
             outputURLs = [micURL, systemURL]
             audioToTranscribeURL = micURL
         } else {
@@ -570,7 +571,7 @@ public struct Pipeline: ParsableCommand {
             print("Note: `stt pipeline` records until you press Ctrl-C, then transcribes automatically.")
         }
         if mode == .meeting {
-            print("Note: meeting pipeline records separate mic/system tracks and transcribes mic.wav until true mix-down lands.")
+            print("Note: meeting pipeline records separate mic/system tracks, then transcribes mixed.wav when mixing succeeds (falls back to mic.wav otherwise).")
         }
 
         do {
@@ -579,6 +580,7 @@ public struct Pipeline: ParsableCommand {
             record.inputDevice = inputDevice
             record.duration = duration
             record.failIfEmpty = failIfEmpty
+            var meetingMixNote: String?
             if mode == .meeting {
                 record.outputDir = runDir.path
                 record.separateTracks = true
@@ -586,6 +588,19 @@ public struct Pipeline: ParsableCommand {
                 record.output = audioToTranscribeURL.path
             }
             try record.run()
+
+            if mode == .meeting {
+                let selection = Self.resolveMeetingAudioSource(micURL: micURL, systemURL: systemURL, mixedURL: mixedURL)
+                audioToTranscribeURL = selection.audioToTranscribeURL
+                outputURLs = selection.outputURLs
+                state.outputPaths = outputURLs.map(\.path)
+                meetingMixNote = selection.note
+                if let note = selection.note {
+                    print("[NOTE] \(note)")
+                } else {
+                    print("Transcribing mixed meeting audio: \(audioToTranscribeURL.path)")
+                }
+            }
 
             let result = try PythonTranscriber.transcribe(
                 audioPath: audioToTranscribeURL.path,
@@ -604,10 +619,35 @@ public struct Pipeline: ParsableCommand {
                 print("Transcription complete. Raw backend output:")
                 print(result.raw)
             }
-            persistState(backend: result.backend)
+            // Successful meeting runs may carry a non-fatal mix fallback note;
+            // mic/system modes keep nil notes so existing success metadata stays clean.
+            persistState(notes: meetingMixNote, backend: result.backend)
         } catch {
             persistState(notes: "Pipeline failed: \(error.localizedDescription)")
             throw error
+        }
+    }
+
+    public struct MeetingAudioSelection: Equatable {
+        public let audioToTranscribeURL: URL
+        public let outputURLs: [URL]
+        public let note: String?
+    }
+
+    public static func resolveMeetingAudioSource(micURL: URL, systemURL: URL, mixedURL: URL) -> MeetingAudioSelection {
+        do {
+            _ = try WAVMixer.mixFiles(micURL, systemURL, outputURL: mixedURL)
+            return MeetingAudioSelection(
+                audioToTranscribeURL: mixedURL,
+                outputURLs: [micURL, systemURL, mixedURL],
+                note: nil
+            )
+        } catch {
+            return MeetingAudioSelection(
+                audioToTranscribeURL: micURL,
+                outputURLs: [micURL, systemURL],
+                note: "Mixed track unavailable (\(error.localizedDescription)); transcribing mic.wav instead."
+            )
         }
     }
 }
