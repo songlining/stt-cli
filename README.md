@@ -102,6 +102,14 @@ Override the bundle ID for local experiments:
 BUNDLE_ID=com.example.stt ./scripts/build-app-bundle.sh
 ```
 
+Local builds are ad-hoc signed by default. Developer ID signing and hardened runtime are opt-in release-maintainer actions:
+
+```bash
+CODESIGN_IDENTITY="Developer ID Application: Example, Inc. (TEAMID)" HARDENED_RUNTIME=1 ./scripts/build-app-bundle.sh
+```
+
+See [`DISTRIBUTION.md`](DISTRIBUTION.md) for the Developer ID signing, notarization, and Homebrew cask plan.
+
 ## Manual TCC attribution smoke test
 
 Run without resetting permissions:

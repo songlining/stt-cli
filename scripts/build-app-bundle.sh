@@ -12,6 +12,8 @@ CONFIGURATION="${CONFIGURATION:-debug}"
 BUNDLE_ID="${BUNDLE_ID:-com.hashicorp.stt}"
 APP_NAME="${APP_NAME:-stt}"
 DIST_DIR="${DIST_DIR:-${REPO_ROOT}/dist}"
+CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
+HARDENED_RUNTIME="${HARDENED_RUNTIME:-0}"
 APP_DIR="${DIST_DIR}/${APP_NAME}.app"
 CONTENTS_DIR="${APP_DIR}/Contents"
 MACOS_DIR="${CONTENTS_DIR}/MacOS"
@@ -47,8 +49,16 @@ cp "${REPO_ROOT}/python/pyproject.toml" "${RESOURCES_DIR}/python/pyproject.toml"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier ${BUNDLE_ID}" "${CONTENTS_DIR}/Info.plist"
 
 if command -v codesign >/dev/null 2>&1; then
-  codesign --force --sign - --entitlements "${ENTITLEMENTS}" "${APP_DIR}" >/dev/null
-  print "Ad-hoc signed ${APP_DIR} with ${ENTITLEMENTS}"
+  codesign_args=(--force --sign "${CODESIGN_IDENTITY}" --entitlements "${ENTITLEMENTS}")
+  if [[ "${HARDENED_RUNTIME}" == "1" ]]; then
+    codesign_args+=(--options runtime)
+  fi
+  codesign "${codesign_args[@]}" "${APP_DIR}" >/dev/null
+  if [[ "${CODESIGN_IDENTITY}" == "-" ]]; then
+    print "Ad-hoc signed ${APP_DIR} with ${ENTITLEMENTS}"
+  else
+    print "Signed ${APP_DIR} with ${CODESIGN_IDENTITY} (hardened runtime: ${HARDENED_RUNTIME})"
+  fi
 else
   print -u2 "warning: codesign not found; app bundle was created unsigned"
 fi
