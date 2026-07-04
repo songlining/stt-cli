@@ -118,13 +118,19 @@ STT_RESET_TCC=1 ./scripts/manual-tcc-smoke.sh
 
 When using `STT_RESET_TCC=1`, confirm the macOS microphone prompt is attributed to `stt` / `com.hashicorp.stt`, not Terminal.
 
+To validate native CoreAudio process-tap system capture with real system audio playing:
+
+```bash
+./scripts/manual-native-tap-smoke.sh
+```
+
 To also validate a routed virtual/aggregate system-audio device during the manual smoke test:
 
 ```bash
 STT_SYSTEM_DEVICE="BlackHole 2ch" ./scripts/manual-tcc-smoke.sh
 ```
 
-The script fails if either mic or optional system fallback recording is header-only/suspiciously small.
+The scripts fail if the relevant recording is header-only/suspiciously small.
 
 Print permission reset guidance for the default bundle ID, or for a custom local bundle ID:
 

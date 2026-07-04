@@ -22,6 +22,7 @@ zsh -n scripts/bootstrap-python-backend.sh
 zsh -n scripts/build-app-bundle.sh
 zsh -n scripts/check-app-bundle.sh
 zsh -n scripts/check-python-backend.sh
+zsh -n scripts/manual-native-tap-smoke.sh
 zsh -n scripts/manual-tcc-smoke.sh
 zsh -n scripts/validate.sh
 zsh -n scripts/lib/bundle-check.sh
