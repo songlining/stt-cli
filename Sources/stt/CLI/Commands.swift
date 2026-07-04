@@ -15,6 +15,7 @@ public struct STT: ParsableCommand {
             Record.self,
             Transcribe.self,
             Pipeline.self,
+            Mix.self,
             Permissions.self
         ]
     )
@@ -607,6 +608,48 @@ public struct Pipeline: ParsableCommand {
             persistState(notes: "Pipeline failed: \(error.localizedDescription)")
             throw error
         }
+    }
+}
+
+// MARK: - stt mix
+
+public struct Mix: ParsableCommand {
+    public static let configuration = CommandConfiguration(abstract: "Mix two compatible WAV files into a mono 16-bit WAV.")
+
+    @Argument(help: "First WAV file, typically mic.wav.")
+    public var firstAudioPath: String
+
+    @Argument(help: "Second WAV file, typically system.wav.")
+    public var secondAudioPath: String
+
+    @Option(name: .long, help: "Output WAV path. Defaults to mixed.wav next to the first input.")
+    public var output: String?
+
+    @Flag(name: .long, help: "Fail if the mixed output looks header-only or contains no audio frames.")
+    public var failIfEmpty: Bool = false
+
+    public init() {}
+
+    public func run() throws {
+        let firstURL = URL(fileURLWithPath: firstAudioPath)
+        let secondURL = URL(fileURLWithPath: secondAudioPath)
+        let outputURL = output.map { URL(fileURLWithPath: $0) }
+            ?? firstURL.deletingLastPathComponent().appendingPathComponent("mixed.wav")
+
+        let result = try WAVMixer.mixFiles(firstURL, secondURL, outputURL: outputURL)
+        print("Mixed: \(result.outputURL.path)")
+        print("Duration: \(String(format: "%.3f", result.durationSeconds))s")
+        print("File size: \(formatFileSize(result.fileSizeBytes))")
+        if let warning = result.emptyAudioWarning {
+            print(warning)
+            if failIfEmpty { throw ValidationError(warning) }
+        }
+    }
+
+    private func formatFileSize(_ bytes: UInt64?) -> String {
+        guard let bytes else { return "unknown size" }
+        if bytes < 1024 { return "\(bytes) bytes" }
+        return String(format: "%.1f KB", Double(bytes) / 1024.0)
     }
 }
 

@@ -160,6 +160,54 @@ run_optional_system_fallback_smoke \
   "Optional system fallback smoke test" \
   "Check that ${STT_SYSTEM_DEVICE:-the selected device} is receiving routed system audio before running this optional check."
 
+print "== Standalone WAV mix smoke test =="
+MIX_SMOKE_DIR="${SMOKE_DIR}/mix-smoke"
+mkdir -p "${MIX_SMOKE_DIR}"
+python3 - "${MIX_SMOKE_DIR}" <<'PY'
+import struct
+import sys
+import wave
+from pathlib import Path
+
+out = Path(sys.argv[1])
+fixtures = {
+    "mic.wav": [1000, 2000, -3000] + [0] * 2997,
+    "system.wav": [3000, -1000] + [0] * 2998,
+}
+for name, samples in fixtures.items():
+    with wave.open(str(out / name), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(8000)
+        wav.writeframes(b"".join(struct.pack("<h", s) for s in samples))
+PY
+"${APP_BIN}" mix \
+  "${MIX_SMOKE_DIR}/mic.wav" \
+  "${MIX_SMOKE_DIR}/system.wav" \
+  --output "${MIX_SMOKE_DIR}/mixed.wav" \
+  --fail-if-empty
+ffprobe -v error -show_entries format=duration,size -of default=nw=1 "${MIX_SMOKE_DIR}/mixed.wav"
+python3 - "${MIX_SMOKE_DIR}/mixed.wav" <<'PY'
+import struct
+import sys
+import wave
+from pathlib import Path
+
+with wave.open(str(Path(sys.argv[1])), "rb") as wav:
+    assert wav.getnchannels() == 1
+    assert wav.getsampwidth() == 2
+    assert wav.getframerate() == 8000
+    frames = wav.readframes(wav.getnframes())
+actual = list(struct.unpack("<" + "h" * (len(frames) // 2), frames))
+if len(actual) != 3000:
+    raise SystemExit(f"unexpected mixed sample count: {len(actual)}")
+expected_prefix = [4000, 1000, -3000]
+if actual[:3] != expected_prefix:
+    raise SystemExit(f"unexpected mixed prefix: {actual[:3]} != {expected_prefix}")
+if any(actual[3:]):
+    raise SystemExit("expected trailing mixed samples to be silence")
+PY
+
 validate_metadata() {
   local metadata_path="$1"
   python3 -m json.tool "${metadata_path}" >/dev/null

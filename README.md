@@ -44,6 +44,7 @@ This runs:
 - Finite mic recording smoke test
 - Optional system fallback smoke test when `STT_SYSTEM_DEVICE` is set
 - Pipeline metadata smoke test
+- Standalone WAV mix smoke test
 - Standalone transcribe smoke test with a generated fake backend
 - Successful pipeline smoke test with a generated fake backend
 - Failing pipeline smoke test with a generated fake backend
@@ -138,6 +139,12 @@ Record meeting tracks and attempt a post-capture `mixed.wav` when both tracks ar
 ```
 
 Use `--separate-tracks` to keep only `mic.wav` and `system.wav` without attempting mix-down.
+
+Mix two existing compatible WAV tracks manually:
+
+```bash
+./dist/stt.app/Contents/MacOS/stt mix /tmp/meeting/mic.wav /tmp/meeting/system.wav --output /tmp/meeting/mixed.wav --fail-if-empty
+```
 
 Run a bounded pipeline:
 

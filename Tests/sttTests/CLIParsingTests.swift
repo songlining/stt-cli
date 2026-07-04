@@ -133,6 +133,14 @@ struct CLIParsingTests {
         #expect(pipeline.requireBackendReady)
     }
 
+    @Test func mixParsesInputsAndOptions() throws {
+        let mix = try Mix.parse(["mic.wav", "system.wav", "--output", "mixed.wav", "--fail-if-empty"])
+        #expect(mix.firstAudioPath == "mic.wav")
+        #expect(mix.secondAudioPath == "system.wav")
+        #expect(mix.output == "mixed.wav")
+        #expect(mix.failIfEmpty)
+    }
+
     @Test func pipelineRejectsInvalidDurationsBeforeStartingCapture() throws {
         let invalidDuration = try Pipeline.parse(["--duration", "0"])
         #expect(throws: (any Error).self) {

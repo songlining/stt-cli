@@ -56,6 +56,12 @@ func runChecks() throws {
         "--model", "custom/model", "--max-new-tokens", "2048", "--python-backend", "/tmp/backend",
         "--require-backend-ready"
     ])
+    let mix = try Mix.parse(["mic.wav", "system.wav", "--output", "mixed.wav", "--fail-if-empty"])
+    try checkEqual(mix.firstAudioPath, "mic.wav", "mix first input parses")
+    try checkEqual(mix.secondAudioPath, "system.wav", "mix second input parses")
+    try checkEqual(mix.output, "mixed.wav", "mix output parses")
+    try check(mix.failIfEmpty, "mix fail-if-empty parses")
+
     try checkEqual(pipeline.mode, .meeting, "pipeline mode parses")
     try checkEqual(pipeline.name, "Customer Call", "pipeline name parses")
     try checkEqual(pipeline.inputDevice, "BlackHole 2ch", "pipeline input device parses")
