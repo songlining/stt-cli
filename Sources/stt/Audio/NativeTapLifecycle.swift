@@ -1,4 +1,6 @@
 import Foundation
+import AVFoundation
+import AVFAudio
 import CoreAudio
 
 /// Low-level CoreAudio operations used by `NativeTapLifecycle`.
@@ -11,8 +13,10 @@ struct NativeTapCoreAudioOperations {
     var destroyProcessTap: (AudioObjectID) -> OSStatus
     var createAggregateDevice: (CFDictionary, inout AudioObjectID) -> OSStatus
     var destroyAggregateDevice: (AudioObjectID) -> OSStatus
-    var startAggregateDevice: (AudioObjectID) -> OSStatus
-    var stopAggregateDevice: (AudioObjectID) -> OSStatus
+    var createIOProc: (_ deviceID: AudioObjectID, _ queue: DispatchQueue?, _ block: @escaping AudioDeviceIOBlock, _ ioProcID: inout AudioDeviceIOProcID?) -> OSStatus
+    var destroyIOProc: (AudioObjectID, AudioDeviceIOProcID) -> OSStatus
+    var startAggregateDevice: (AudioObjectID, AudioDeviceIOProcID?) -> OSStatus
+    var stopAggregateDevice: (AudioObjectID, AudioDeviceIOProcID?) -> OSStatus
 
     static var live: NativeTapCoreAudioOperations {
         NativeTapCoreAudioOperations(
@@ -30,14 +34,19 @@ struct NativeTapCoreAudioOperations {
             },
             createAggregateDevice: { description, deviceID in AudioHardwareCreateAggregateDevice(description, &deviceID) },
             destroyAggregateDevice: { deviceID in AudioHardwareDestroyAggregateDevice(deviceID) },
-            startAggregateDevice: { deviceID in AudioDeviceStart(deviceID, nil) },
-            stopAggregateDevice: { deviceID in AudioDeviceStop(deviceID, nil) }
+            createIOProc: { deviceID, queue, block, ioProcID in
+                AudioDeviceCreateIOProcIDWithBlock(&ioProcID, deviceID, queue, block)
+            },
+            destroyIOProc: { deviceID, ioProcID in AudioDeviceDestroyIOProcID(deviceID, ioProcID) },
+            startAggregateDevice: { deviceID, ioProcID in AudioDeviceStart(deviceID, ioProcID) },
+            stopAggregateDevice: { deviceID, ioProcID in AudioDeviceStop(deviceID, ioProcID) }
         )
     }
 }
 
 struct NativeTapCleanupResult: Equatable {
     var stopStatus: OSStatus?
+    var destroyIOProcStatus: OSStatus?
     var destroyAggregateStatus: OSStatus?
     var destroyTapStatus: OSStatus?
 
@@ -53,6 +62,7 @@ enum NativeTapLifecycleError: Error, LocalizedError, Equatable {
     case unsupported(String)
     case createProcessTapFailed(OSStatus)
     case createAggregateDeviceFailed(OSStatus, cleanup: NativeTapCleanupResult)
+    case createIOProcFailed(OSStatus, cleanup: NativeTapCleanupResult)
     case startAggregateDeviceFailed(OSStatus, cleanup: NativeTapCleanupResult)
     case stopFailed(NativeTapCleanupResult)
 
@@ -64,6 +74,8 @@ enum NativeTapLifecycleError: Error, LocalizedError, Equatable {
             return "AudioHardwareCreateProcessTap failed with OSStatus \(status)"
         case .createAggregateDeviceFailed(let status, let cleanup):
             return "AudioHardwareCreateAggregateDevice failed with OSStatus \(status); cleanup succeeded: \(cleanup.succeeded)"
+        case .createIOProcFailed(let status, let cleanup):
+            return "AudioDeviceCreateIOProcIDWithBlock failed with OSStatus \(status); cleanup succeeded: \(cleanup.succeeded)"
         case .startAggregateDeviceFailed(let status, let cleanup):
             return "AudioDeviceStart failed with OSStatus \(status); cleanup succeeded: \(cleanup.succeeded)"
         case .stopFailed(let cleanup):
@@ -103,6 +115,127 @@ final class NativeProcessTapResource {
     }
 }
 
+/// Thread-safe bridge from CoreAudio IOProc buffers to `StreamingWAVWriter`.
+///
+/// The IOProc path copies/normalizes input buffers into Int16 interleaved PCM
+/// and appends on a dedicated serial queue. `finish()` drains that queue before
+/// patching the WAV header, so late queued writes cannot race header finalization.
+final class NativeTapWAVBridge: @unchecked Sendable {
+    private let writer: StreamingWAVWriter
+    private let queue = DispatchQueue(label: "com.hashicorp.stt.native-tap.wav-writer")
+    private let lock = NSLock()
+    private var acceptingBuffers = true
+    private var appendError: Error?
+
+    let sampleRate: UInt32
+    let channels: UInt16
+
+    init(outputURL: URL, sampleRate: UInt32 = 48_000, channels: UInt16 = 2) throws {
+        self.sampleRate = sampleRate
+        self.channels = channels
+        self.writer = try StreamingWAVWriter(url: outputURL, sampleRate: sampleRate, channels: channels, bitDepth: 16)
+    }
+
+    func consume(_ inputData: UnsafePointer<AudioBufferList>?) {
+        guard let pcm = Self.int16PCM(from: inputData, targetChannels: Int(channels)), !pcm.isEmpty else { return }
+
+        lock.lock()
+        let shouldAccept = acceptingBuffers
+        lock.unlock()
+        guard shouldAccept else { return }
+
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            let shouldWrite = self.acceptingBuffers
+            self.lock.unlock()
+            guard shouldWrite else { return }
+            do {
+                try self.writer.append(pcm)
+            } catch {
+                self.lock.lock()
+                if self.appendError == nil { self.appendError = error }
+                self.lock.unlock()
+            }
+        }
+    }
+
+    @discardableResult
+    func finish() throws -> URL {
+        lock.lock()
+        acceptingBuffers = false
+        lock.unlock()
+
+        queue.sync {}
+
+        lock.lock()
+        let capturedError = appendError
+        lock.unlock()
+        if let capturedError { throw capturedError }
+        return try writer.finish()
+    }
+
+    var durationSeconds: Double { writer.durationSeconds }
+
+    static func int16PCM(from inputData: UnsafePointer<AudioBufferList>?, targetChannels: Int = 2) -> Data? {
+        guard let inputData, targetChannels > 0 else { return nil }
+        let bufferCount = Int(inputData.pointee.mNumberBuffers)
+        guard bufferCount > 0 else { return nil }
+
+        return withUnsafePointer(to: inputData.pointee.mBuffers) { firstBuffer in
+            let buffers = UnsafeBufferPointer(start: firstBuffer, count: bufferCount)
+
+            if bufferCount == 1 {
+                let buffer = buffers[0]
+                guard let data = buffer.mData, buffer.mDataByteSize > 0 else { return nil }
+                let sampleCount = Int(buffer.mDataByteSize) / MemoryLayout<Float32>.size
+                guard sampleCount > 0 else { return nil }
+                let samples = data.assumingMemoryBound(to: Float32.self)
+                var out = Data(capacity: sampleCount * MemoryLayout<Int16>.size)
+                for index in 0..<sampleCount {
+                    out.append(Self.int16Sample(from: samples[index]))
+                }
+                return out
+            }
+
+            let usableBuffers = min(bufferCount, targetChannels)
+            guard usableBuffers > 0 else { return nil }
+            let frameCount = (0..<usableBuffers)
+                .compactMap { index -> Int? in
+                    let buffer = buffers[index]
+                    guard buffer.mData != nil, buffer.mDataByteSize > 0 else { return nil }
+                    return Int(buffer.mDataByteSize) / MemoryLayout<Float32>.size
+                }
+                .min() ?? 0
+            guard frameCount > 0 else { return nil }
+
+            var out = Data(capacity: frameCount * targetChannels * MemoryLayout<Int16>.size)
+            for frame in 0..<frameCount {
+                for channel in 0..<targetChannels {
+                    let sourceChannel = min(channel, usableBuffers - 1)
+                    let buffer = buffers[sourceChannel]
+                    let samples = buffer.mData!.assumingMemoryBound(to: Float32.self)
+                    out.append(Self.int16Sample(from: samples[frame]))
+                }
+            }
+            return out
+        }
+    }
+
+    private static func int16Sample(from sample: Float32) -> Int16 {
+        let clamped = max(-1.0, min(1.0, sample))
+        let scaled = clamped < 0 ? clamped * 32768.0 : clamped * 32767.0
+        return Int16(scaled).littleEndian
+    }
+}
+
+private extension Data {
+    mutating func append(_ value: Int16) {
+        var mutable = value
+        Swift.withUnsafeBytes(of: &mutable) { append(contentsOf: $0) }
+    }
+}
+
 /// Owns the first safe native CoreAudio tap lifecycle step:
 ///
 /// 1. create a process tap;
@@ -119,24 +252,30 @@ final class NativeTapLifecycle {
     private let tapDescription: CATapDescription
     private let aggregateName: String
     private let aggregateUID: String
+    private let audioBridge: NativeTapWAVBridge?
+    private let ioQueue = DispatchQueue(label: "com.hashicorp.stt.native-tap.ioproc")
 
     private var tapResource: NativeProcessTapResource?
     private var aggregateDeviceID: AudioObjectID?
+    private var ioProcID: AudioDeviceIOProcID?
     private var started = false
 
     var tapID: AudioObjectID? { tapResource?.tapID }
     var tapUUID: UUID? { tapResource?.tapUUID }
     var aggregateID: AudioObjectID? { aggregateDeviceID }
+    var hasIOProc: Bool { ioProcID != nil }
     var isStarted: Bool { started }
 
     init(tapDescription: CATapDescription,
          aggregateName: String = "stt native tap aggregate",
          aggregateUID: String = "com.hashicorp.stt.native-tap.aggregate.\(UUID().uuidString)",
+         audioBridge: NativeTapWAVBridge? = nil,
          operations: NativeTapCoreAudioOperations = .live,
          availabilityProvider: @escaping () -> NativeTapAvailability = SystemAudioRecorder.probeNativeTapAvailability) {
         self.tapDescription = tapDescription
         self.aggregateName = aggregateName
         self.aggregateUID = aggregateUID
+        self.audioBridge = audioBridge
         self.operations = operations
         self.availabilityProvider = availabilityProvider
     }
@@ -192,7 +331,20 @@ final class NativeTapLifecycle {
             }
             self.aggregateDeviceID = aggregateDeviceID
 
-            let startStatus = operations.startAggregateDevice(aggregateDeviceID)
+            if let audioBridge {
+                var ioProcID: AudioDeviceIOProcID?
+                let block: AudioDeviceIOBlock = { _, inputData, _, _, _ in
+                    audioBridge.consume(inputData)
+                }
+                let ioProcStatus = operations.createIOProc(aggregateDeviceID, ioQueue, block, &ioProcID)
+                guard ioProcStatus == noErr, let ioProcID else {
+                    let cleanup = cleanupAfterFailedStart(includeStop: false)
+                    throw NativeTapLifecycleError.createIOProcFailed(ioProcStatus, cleanup: cleanup)
+                }
+                self.ioProcID = ioProcID
+            }
+
+            let startStatus = operations.startAggregateDevice(aggregateDeviceID, ioProcID)
             guard startStatus == noErr else {
                 let cleanup = cleanupAfterFailedStart(includeStop: false)
                 throw NativeTapLifecycleError.startAggregateDeviceFailed(startStatus, cleanup: cleanup)
@@ -216,9 +368,14 @@ final class NativeTapLifecycle {
         var result = NativeTapCleanupResult()
 
         if includeStop, let aggregateDeviceID {
-            result.stopStatus = operations.stopAggregateDevice(aggregateDeviceID)
+            result.stopStatus = operations.stopAggregateDevice(aggregateDeviceID, ioProcID)
         }
         started = false
+
+        if let aggregateDeviceID, let ioProcID {
+            result.destroyIOProcStatus = operations.destroyIOProc(aggregateDeviceID, ioProcID)
+            self.ioProcID = nil
+        }
 
         if let aggregateDeviceID {
             result.destroyAggregateStatus = operations.destroyAggregateDevice(aggregateDeviceID)

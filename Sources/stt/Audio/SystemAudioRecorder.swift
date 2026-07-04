@@ -86,12 +86,15 @@ public struct NativeTapDiagnostic: Equatable, Codable {
 
 public enum SystemAudioRecorderError: Error, LocalizedError {
     case tapUnavailable(String)
+    case nativeCaptureFailed(String)
     case noFallbackDeviceConfigured
 
     public var errorDescription: String? {
         switch self {
         case .tapUnavailable(let reason):
             return "Native system-audio capture unavailable: \(reason)"
+        case .nativeCaptureFailed(let reason):
+            return "Native system-audio capture failed: \(reason)"
         case .noFallbackDeviceConfigured:
             return Self.fallbackConfigurationGuidance()
         }
@@ -100,7 +103,7 @@ public enum SystemAudioRecorderError: Error, LocalizedError {
     public static func fallbackConfigurationGuidance() -> String {
         """
         No fallback input device configured or found for system-audio capture.
-        Native CoreAudio process-tap capture is not wired yet, so system mode currently needs a routed virtual/aggregate input device.
+        Native CoreAudio process-tap capture could not start, so system mode needs a routed virtual/aggregate input device fallback.
         Try:
           1. Install/configure BlackHole or an Aggregate Device.
           2. Confirm it appears in `stt devices`.
@@ -138,6 +141,10 @@ public enum SystemAudioRecorderError: Error, LocalizedError {
 ///   as a soft failure and fall back to `.namedInputDeviceFallback`.
 public final class SystemAudioRecorder {
     private let micRecorder = MicRecorder()
+    private var nativeLifecycle: NativeTapLifecycle?
+    private var nativeBridge: NativeTapWAVBridge?
+    private var nativeStartTime: Date?
+    private var nativeOutputURL: URL?
     public private(set) var activeMethod: SystemAudioCaptureMethod?
 
     public init() {}
@@ -240,21 +247,43 @@ public final class SystemAudioRecorder {
         #endif
     }
 
-    /// Attempts native CoreAudio process-tap capture. Currently always
-    /// throws `.tapUnavailable` — see type-level documentation. Kept as a
-    /// distinct entry point so a future implementation can slot in without
-    /// changing call sites in `record(...)`.
+    /// Attempts native CoreAudio process-tap capture. On success, CoreAudio
+    /// callbacks append Float32 tap buffers as interleaved 16-bit PCM WAV data
+    /// through `NativeTapWAVBridge`. On any setup failure, all partial native
+    /// resources are cleaned up and the caller falls back to named input-device
+    /// capture.
     private func startNativeTap(outputURL: URL) throws {
         let availability = Self.probeNativeTapAvailability()
         guard availability.isPotentiallyAvailable else {
             throw SystemAudioRecorderError.tapUnavailable(availability.summary)
         }
-        // NOT IMPLEMENTED: AudioHardwareCreateProcessTap / AudioHardwareCreateAggregateDevice
-        // wiring. See type-level doc comment for rationale and follow-up plan.
-        throw SystemAudioRecorderError.tapUnavailable(
-            "CoreAudio process-tap capture symbols are available, but capture wiring is not yet implemented in this build; " +
-            "falling back to named-input-device capture (e.g. BlackHole/Aggregate Device)."
+
+        try Paths.ensureDirectoryExists(outputURL.deletingLastPathComponent())
+
+        let bridge: NativeTapWAVBridge
+        do {
+            bridge = try NativeTapWAVBridge(outputURL: outputURL, sampleRate: 48_000, channels: 2)
+        } catch {
+            throw SystemAudioRecorderError.nativeCaptureFailed("could not create WAV writer at \(outputURL.path): \(error.localizedDescription)")
+        }
+
+        let lifecycle = NativeTapLifecycle(
+            tapDescription: NativeTapLifecycle.defaultTapDescription(name: "stt native system-audio tap"),
+            audioBridge: bridge
         )
+
+        do {
+            try lifecycle.start()
+        } catch {
+            _ = try? bridge.finish()
+            try? FileManager.default.removeItem(at: outputURL)
+            throw SystemAudioRecorderError.nativeCaptureFailed(error.localizedDescription)
+        }
+
+        nativeBridge = bridge
+        nativeLifecycle = lifecycle
+        nativeStartTime = Date()
+        nativeOutputURL = outputURL
     }
 
     /// Starts system-audio capture, preferring the native tap and silently
@@ -281,10 +310,62 @@ public final class SystemAudioRecorder {
     @discardableResult
     public func stop() throws -> RecordingResult {
         defer { activeMethod = nil }
-        return try micRecorder.stop()
+        switch activeMethod {
+        case .coreAudioTap:
+            return try stopNativeTap()
+        case .namedInputDeviceFallback:
+            return try micRecorder.stop()
+        case nil:
+            if micRecorder.isRunning { return try micRecorder.stop() }
+            throw MicRecorderError.notRecording
+        }
     }
 
-    public var isRunning: Bool { micRecorder.isRunning }
+    public var isRunning: Bool { micRecorder.isRunning || nativeLifecycle?.isStarted == true }
+
+    private func stopNativeTap() throws -> RecordingResult {
+        guard let lifecycle = nativeLifecycle,
+              let bridge = nativeBridge,
+              let startTime = nativeStartTime,
+              let outputURL = nativeOutputURL else {
+            throw MicRecorderError.notRecording
+        }
+
+        var lifecycleError: Error?
+        do {
+            _ = try lifecycle.stop()
+        } catch {
+            lifecycleError = error
+        }
+
+        let finalURL = try bridge.finish()
+        let duration = Date().timeIntervalSince(startTime)
+
+        nativeLifecycle = nil
+        nativeBridge = nil
+        nativeStartTime = nil
+        nativeOutputURL = nil
+
+        if let lifecycleError {
+            throw SystemAudioRecorderError.nativeCaptureFailed(lifecycleError.localizedDescription)
+        }
+
+        return RecordingResult(
+            outputURL: finalURL,
+            durationSeconds: duration,
+            fileSizeBytes: Self.fileSizeBytes(for: outputURL)
+        )
+    }
+
+    private static func fileSizeBytes(for url: URL) -> UInt64? {
+        guard let size = try? FileManager.default.attributesOfItem(atPath: url.path)[.size] else {
+            return nil
+        }
+        if let number = size as? NSNumber { return number.uint64Value }
+        if let uint64 = size as? UInt64 { return uint64 }
+        if let int = size as? Int { return UInt64(int) }
+        return nil
+    }
 
     /// Common virtual-device names to probe when the caller doesn't specify one.
     public static let commonFallbackDeviceNames = ["BlackHole 2ch", "BlackHole", "Aggregate Device"]

@@ -3,6 +3,16 @@ import CoreAudio
 import Testing
 @testable import sttCore
 
+private func nativeTapTestIOProc(_ inDevice: AudioObjectID,
+                                 _ inNow: UnsafePointer<AudioTimeStamp>,
+                                 _ inInputData: UnsafePointer<AudioBufferList>,
+                                 _ inInputTime: UnsafePointer<AudioTimeStamp>,
+                                 _ outOutputData: UnsafeMutablePointer<AudioBufferList>,
+                                 _ inOutputTime: UnsafePointer<AudioTimeStamp>,
+                                 _ inClientData: UnsafeMutableRawPointer?) -> OSStatus {
+    noErr
+}
+
 @Suite("SystemAudioRecorder")
 struct SystemAudioRecorderTests {
 
@@ -158,11 +168,11 @@ struct SystemAudioRecorderTests {
                 events.append("destroyAggregate:\(deviceID)")
                 return noErr
             },
-            startAggregateDevice: { deviceID in
+            startAggregateDevice: { deviceID, _ in
                 events.append("startAggregate:\(deviceID)")
                 return noErr
             },
-            stopAggregateDevice: { deviceID in
+            stopAggregateDevice: { deviceID, _ in
                 events.append("stopAggregate:\(deviceID)")
                 return noErr
             }
@@ -236,6 +246,109 @@ struct SystemAudioRecorderTests {
         #expect(events == ["createTap", "createAggregate", "destroyTap:303"])
     }
 
+    @Test func nativeTapLifecycleWithAudioBridgeCreatesIOProcAndWritesWAV() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let outputURL = tempDir.appendingPathComponent("native-tap.wav")
+        let bridge = try NativeTapWAVBridge(outputURL: outputURL, sampleRate: 48_000, channels: 2)
+
+        var events: [String] = []
+        let operations = NativeTapCoreAudioOperations.mock(
+            createProcessTap: { _, tapID in
+                events.append("createTap")
+                tapID = 404
+                return noErr
+            },
+            destroyProcessTap: { tapID in
+                events.append("destroyTap:\(tapID)")
+                return noErr
+            },
+            createAggregateDevice: { _, deviceID in
+                events.append("createAggregate")
+                deviceID = 505
+                return noErr
+            },
+            destroyAggregateDevice: { deviceID in
+                events.append("destroyAggregate:\(deviceID)")
+                return noErr
+            },
+            createIOProc: { deviceID, _, block, ioProcID in
+                events.append("createIOProc:\(deviceID)")
+                ioProcID = nativeTapTestIOProc
+
+                var samples: [Float32] = [0.0, 0.5, -0.5, 1.0]
+                samples.withUnsafeMutableBytes { rawBuffer in
+                    var buffer = AudioBuffer(
+                        mNumberChannels: 2,
+                        mDataByteSize: UInt32(rawBuffer.count),
+                        mData: rawBuffer.baseAddress
+                    )
+                    var inputList = AudioBufferList(mNumberBuffers: 1, mBuffers: buffer)
+                    var outputBuffer = AudioBuffer(mNumberChannels: 0, mDataByteSize: 0, mData: nil)
+                    var outputList = AudioBufferList(mNumberBuffers: 1, mBuffers: outputBuffer)
+                    var now = AudioTimeStamp()
+                    block(&now, &inputList, &now, &outputList, &now)
+                }
+                return noErr
+            },
+            destroyIOProc: { deviceID, _ in
+                events.append("destroyIOProc:\(deviceID)")
+                return noErr
+            },
+            startAggregateDevice: { deviceID, ioProcID in
+                events.append("startAggregate:\(deviceID):\(ioProcID == nil ? "nil" : "ioproc")")
+                return noErr
+            },
+            stopAggregateDevice: { deviceID, ioProcID in
+                events.append("stopAggregate:\(deviceID):\(ioProcID == nil ? "nil" : "ioproc")")
+                return noErr
+            }
+        )
+
+        let lifecycle = NativeTapLifecycle(
+            tapDescription: NativeTapLifecycle.defaultTapDescription(name: "stt test tap"),
+            audioBridge: bridge,
+            operations: operations,
+            availabilityProvider: Self.availableNativeTap
+        )
+
+        try lifecycle.start()
+        #expect(lifecycle.isStarted)
+        #expect(lifecycle.hasIOProc)
+        _ = try lifecycle.stop()
+        _ = try bridge.finish()
+
+        let size = try #require(try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size] as? NSNumber)
+        #expect(size.uint64Value > 44)
+        #expect(events == [
+            "createTap",
+            "createAggregate",
+            "createIOProc:505",
+            "startAggregate:505:ioproc",
+            "stopAggregate:505:ioproc",
+            "destroyIOProc:505",
+            "destroyAggregate:505",
+            "destroyTap:404"
+        ])
+    }
+
+    @Test func nativeTapPCMConversionHandlesInterleavedFloat32() throws {
+        var samples: [Float32] = [-1.0, -0.5, 0.0, 0.5, 1.0]
+        let pcm = samples.withUnsafeMutableBytes { rawBuffer -> Data? in
+            var buffer = AudioBuffer(
+                mNumberChannels: 2,
+                mDataByteSize: UInt32(rawBuffer.count),
+                mData: rawBuffer.baseAddress
+            )
+            var list = AudioBufferList(mNumberBuffers: 1, mBuffers: buffer)
+            return NativeTapWAVBridge.int16PCM(from: &list, targetChannels: 2)
+        }
+
+        let data = try #require(pcm)
+        #expect(data.count == samples.count * MemoryLayout<Int16>.size)
+    }
+
     @Test func nativeTapLifecycleDoesNotCallCoreAudioWhenUnavailable() throws {
         var coreAudioCallCount = 0
         let operations = NativeTapCoreAudioOperations.mock(
@@ -286,14 +399,21 @@ private extension NativeTapCoreAudioOperations {
         destroyProcessTap: @escaping (AudioObjectID) -> OSStatus = { _ in noErr },
         createAggregateDevice: @escaping (CFDictionary, inout AudioObjectID) -> OSStatus = { _, _ in noErr },
         destroyAggregateDevice: @escaping (AudioObjectID) -> OSStatus = { _ in noErr },
-        startAggregateDevice: @escaping (AudioObjectID) -> OSStatus = { _ in noErr },
-        stopAggregateDevice: @escaping (AudioObjectID) -> OSStatus = { _ in noErr }
+        createIOProc: @escaping (AudioObjectID, DispatchQueue?, @escaping AudioDeviceIOBlock, inout AudioDeviceIOProcID?) -> OSStatus = { _, _, _, ioProcID in
+            ioProcID = nativeTapTestIOProc
+            return noErr
+        },
+        destroyIOProc: @escaping (AudioObjectID, AudioDeviceIOProcID) -> OSStatus = { _, _ in noErr },
+        startAggregateDevice: @escaping (AudioObjectID, AudioDeviceIOProcID?) -> OSStatus = { _, _ in noErr },
+        stopAggregateDevice: @escaping (AudioObjectID, AudioDeviceIOProcID?) -> OSStatus = { _, _ in noErr }
     ) -> NativeTapCoreAudioOperations {
         NativeTapCoreAudioOperations(
             createProcessTap: createProcessTap,
             destroyProcessTap: destroyProcessTap,
             createAggregateDevice: createAggregateDevice,
             destroyAggregateDevice: destroyAggregateDevice,
+            createIOProc: createIOProc,
+            destroyIOProc: destroyIOProc,
             startAggregateDevice: startAggregateDevice,
             stopAggregateDevice: stopAggregateDevice
         )

@@ -280,16 +280,23 @@ else
   MEETING_MISSING_EXIT=$?
   set -e
   if [[ ${MEETING_MISSING_EXIT} -eq 0 ]]; then
-    print -u2 "error: meeting recording succeeded despite missing system fallback device"
-    head -80 "${MEETING_MISSING_DIR}/stdout.txt" >&2 || true
-    head -80 "${MEETING_MISSING_DIR}/stderr.txt" >&2 || true
-    exit 1
-  fi
-  if ! grep -q "No input device found matching \"${MEETING_MISSING_DEVICE}\"" "${MEETING_MISSING_DIR}/stderr.txt" "${MEETING_MISSING_DIR}/stdout.txt"; then
-    print -u2 "error: meeting missing-device output did not include expected device guidance"
-    head -80 "${MEETING_MISSING_DIR}/stdout.txt" >&2 || true
-    head -80 "${MEETING_MISSING_DIR}/stderr.txt" >&2 || true
-    exit 1
+    if ! grep -q "native system-audio tap" "${MEETING_MISSING_DIR}/stdout.txt"; then
+      print -u2 "error: meeting recording succeeded with missing fallback device but did not report native tap capture"
+      head -80 "${MEETING_MISSING_DIR}/stdout.txt" >&2 || true
+      head -80 "${MEETING_MISSING_DIR}/stderr.txt" >&2 || true
+      exit 1
+    fi
+    assert_audio_file_has_payload \
+      "${MEETING_MISSING_DIR}/recording/system.wav" \
+      "meeting native system-audio smoke test" \
+      "Native CoreAudio system capture started but wrote no payload. Check system audio activity and TCC permissions."
+  else
+    if ! grep -q "No input device found matching \"${MEETING_MISSING_DEVICE}\"" "${MEETING_MISSING_DIR}/stderr.txt" "${MEETING_MISSING_DIR}/stdout.txt"; then
+      print -u2 "error: meeting missing-device output did not include expected device guidance"
+      head -80 "${MEETING_MISSING_DIR}/stdout.txt" >&2 || true
+      head -80 "${MEETING_MISSING_DIR}/stderr.txt" >&2 || true
+      exit 1
+    fi
   fi
 fi
 
@@ -532,21 +539,33 @@ set +e
 STT_HOME="${MEETING_FAIL_PIPE_HOME}" "${APP_BIN}" pipeline --mode meeting --name meeting-fail --duration 1 --input-device "${MEETING_MISSING_DEVICE}" --transcribe-timeout 5 --device cpu --python-backend "${FAKE_BACKEND}" >"${MEETING_FAIL_PIPE_HOME}/stdout.txt" 2>"${MEETING_FAIL_PIPE_HOME}/stderr.txt"
 MEETING_FAIL_PIPE_EXIT=$?
 set -e
-if [[ ${MEETING_FAIL_PIPE_EXIT} -eq 0 ]]; then
-  print -u2 "error: meeting pipeline succeeded despite missing system fallback device"
-  head -80 "${MEETING_FAIL_PIPE_HOME}/stdout.txt" >&2 || true
-  head -80 "${MEETING_FAIL_PIPE_HOME}/stderr.txt" >&2 || true
-  exit 1
-fi
 MEETING_FAIL_METADATA_PATH="$(find "${MEETING_FAIL_PIPE_HOME}" -maxdepth 4 -name metadata.json -type f | head -1)"
 if [[ -z "${MEETING_FAIL_METADATA_PATH}" ]]; then
-  print -u2 "error: failing meeting pipeline did not write metadata.json"
+  print -u2 "error: meeting pipeline missing-device smoke did not write metadata.json"
   head -80 "${MEETING_FAIL_PIPE_HOME}/stdout.txt" >&2 || true
   head -80 "${MEETING_FAIL_PIPE_HOME}/stderr.txt" >&2 || true
   exit 1
 fi
 validate_metadata "${MEETING_FAIL_METADATA_PATH}"
-python3 - "${MEETING_FAIL_METADATA_PATH}" "${MEETING_MISSING_DEVICE}" <<'PY'
+if [[ ${MEETING_FAIL_PIPE_EXIT} -eq 0 ]]; then
+  if ! grep -q "native system-audio tap" "${MEETING_FAIL_PIPE_HOME}/stdout.txt"; then
+    print -u2 "error: meeting pipeline succeeded with missing fallback device but did not report native tap capture"
+    head -80 "${MEETING_FAIL_PIPE_HOME}/stdout.txt" >&2 || true
+    head -80 "${MEETING_FAIL_PIPE_HOME}/stderr.txt" >&2 || true
+    exit 1
+  fi
+  MEETING_NATIVE_SYSTEM_WAV="$(find "${MEETING_FAIL_PIPE_HOME}" -maxdepth 4 -name system.wav -type f | head -1)"
+  if [[ -z "${MEETING_NATIVE_SYSTEM_WAV}" ]]; then
+    print -u2 "error: successful native meeting pipeline did not write system.wav"
+    head -80 "${MEETING_FAIL_PIPE_HOME}/stdout.txt" >&2 || true
+    exit 1
+  fi
+  assert_audio_file_has_payload \
+    "${MEETING_NATIVE_SYSTEM_WAV}" \
+    "meeting pipeline native system-audio smoke test" \
+    "Native CoreAudio system capture started but wrote no payload. Check system audio activity and TCC permissions."
+else
+  python3 - "${MEETING_FAIL_METADATA_PATH}" "${MEETING_MISSING_DEVICE}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -567,7 +586,8 @@ for key in ("transcriptTextPath", "transcriptJSONPath"):
     if path_value and Path(path_value).exists():
         raise SystemExit(f"unexpected transcript output exists for meeting recording failure: {path_value}")
 PY
-print "Failing meeting pipeline metadata: ${MEETING_FAIL_METADATA_PATH}"
+fi
+print "Meeting pipeline missing-device metadata: ${MEETING_FAIL_METADATA_PATH}"
 
 print "== Failing pipeline smoke test with fake backend =="
 FAILING_BACKEND="${SMOKE_DIR}/fake-backend-failing"
