@@ -18,8 +18,9 @@ func checkEqual<T: Equatable>(_ actual: T, _ expected: T, _ message: String) thr
 }
 
 func runChecks() throws {
-    let doctor = try Doctor.parse(["--python-backend", "/tmp/backend"])
+    let doctor = try Doctor.parse(["--python-backend", "/tmp/backend", "--require-backend-ready"])
     try checkEqual(doctor.pythonBackend, "/tmp/backend", "doctor python backend parses")
+    try check(doctor.requireBackendReady, "doctor require-backend-ready parses")
 
     let record = try Record.parse(["--mode", "mic", "--output", "foo.wav", "--duration", "1.5"])
     try checkEqual(record.mode, .mic, "record mode parses")
@@ -33,7 +34,7 @@ func runChecks() throws {
     let transcribe = try Transcribe.parse([
         "meeting.wav", "--output", "out.txt", "--json", "out.json", "--device", "gpu",
         "--timeout", "30", "--model", "custom/model", "--max-new-tokens", "2048",
-        "--python-backend", "/tmp/backend"
+        "--python-backend", "/tmp/backend", "--require-backend-ready"
     ])
     try checkEqual(transcribe.audioPath, "meeting.wav", "transcribe audio path parses")
     try checkEqual(transcribe.output, "out.txt", "transcribe output parses")
@@ -43,11 +44,13 @@ func runChecks() throws {
     try checkEqual(transcribe.model, "custom/model", "transcribe model parses")
     try checkEqual(transcribe.maxNewTokens, 2048, "transcribe max-new-tokens parses")
     try checkEqual(transcribe.pythonBackend, "/tmp/backend", "transcribe python backend parses")
+    try check(transcribe.requireBackendReady, "transcribe require-backend-ready parses")
 
     let pipeline = try Pipeline.parse([
         "--mode", "meeting", "--name", "Customer Call", "--input-device", "BlackHole 2ch",
         "--duration", "5", "--transcribe-timeout", "120", "--device", "cpu",
-        "--model", "custom/model", "--max-new-tokens", "2048", "--python-backend", "/tmp/backend"
+        "--model", "custom/model", "--max-new-tokens", "2048", "--python-backend", "/tmp/backend",
+        "--require-backend-ready"
     ])
     try checkEqual(pipeline.mode, .meeting, "pipeline mode parses")
     try checkEqual(pipeline.name, "Customer Call", "pipeline name parses")
@@ -58,6 +61,7 @@ func runChecks() throws {
     try checkEqual(pipeline.model, "custom/model", "pipeline model parses")
     try checkEqual(pipeline.maxNewTokens, 2048, "pipeline max-new-tokens parses")
     try checkEqual(pipeline.pythonBackend, "/tmp/backend", "pipeline python backend parses")
+    try check(pipeline.requireBackendReady, "pipeline require-backend-ready parses")
 
     let env = ["STT_HOME": "/tmp/stt-test-home"]
     try checkEqual(Paths.appSupportDirectory(environment: env).path, "/tmp/stt-test-home", "STT_HOME override works")

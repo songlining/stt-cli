@@ -1,6 +1,19 @@
 from __future__ import annotations
 
-from stt_vibevoice.status import REQUIRED_MODULES, RUNTIME_ENV_VAR, doctor, format_report
+import json
+import tomllib
+from pathlib import Path
+
+import stt_vibevoice.status as status_module
+from stt_vibevoice.status import (
+    REQUIRED_MODULES,
+    RUNTIME_ENV_VAR,
+    doctor,
+    format_report,
+    main,
+    missing_requirements,
+    setup_hint,
+)
 
 
 class TestDoctor:
@@ -56,6 +69,57 @@ class TestDoctor:
         assert "entries" in report["model_cache"]
 
 
+class TestSetupHint:
+    def test_missing_requirements_lists_missing_modules_and_tools(self):
+        report = {
+            "platform": {"is_apple_silicon": False},
+            "binaries": {"ffmpeg": None, "ffprobe": "/opt/homebrew/bin/ffprobe"},
+            "modules": {
+                "mlx": False,
+                "mlx_audio": False,
+                "huggingface_hub": True,
+                "sentencepiece": False,
+            },
+        }
+
+        missing = missing_requirements(report)
+
+        assert "Apple Silicon macOS" in missing
+        assert "ffmpeg" in missing
+        assert "python module mlx" in missing
+        assert "python module mlx_audio" in missing
+        assert "python module sentencepiece" in missing
+        assert "ffprobe" not in missing
+        assert "python module huggingface_hub" not in missing
+
+    def test_setup_hint_is_actionable_when_missing_dependencies(self):
+        report = {
+            "platform": {"is_apple_silicon": True},
+            "binaries": {"ffmpeg": "/opt/homebrew/bin/ffmpeg", "ffprobe": "/opt/homebrew/bin/ffprobe"},
+            "modules": {
+                "mlx": False,
+                "mlx_audio": False,
+                "huggingface_hub": True,
+                "sentencepiece": False,
+            },
+        }
+
+        hint = setup_hint(report)
+
+        assert "missing:" in hint
+        assert "python module mlx" in hint
+        assert "pip install 'mlx-audio[stt]'" in hint
+
+    def test_setup_hint_reports_ready_when_nothing_missing(self):
+        report = {
+            "platform": {"is_apple_silicon": True},
+            "binaries": {"ffmpeg": "/opt/homebrew/bin/ffmpeg", "ffprobe": "/opt/homebrew/bin/ffprobe"},
+            "modules": {module: True for module in REQUIRED_MODULES},
+        }
+
+        assert setup_hint(report) == "backend ready; no setup needed"
+
+
 class TestFormatReport:
     def test_format_report_produces_readable_text(self):
         report = doctor()
@@ -64,3 +128,74 @@ class TestFormatReport:
         assert "Apple Silicon" in text
         assert "ffmpeg" in text
         assert "overall ready" in text
+
+    def test_format_report_includes_setup_hint_when_not_ready(self):
+        report = {
+            "platform": {"system": "Darwin", "machine": "arm64", "is_apple_silicon": True},
+            "binaries": {"ffmpeg": "/opt/homebrew/bin/ffmpeg", "ffprobe": "/opt/homebrew/bin/ffprobe"},
+            "modules": {
+                "mlx": False,
+                "mlx_audio": False,
+                "huggingface_hub": True,
+                "sentencepiece": False,
+            },
+            "runtime": {"configured": False},
+            "model_cache": {"path": "/tmp/cache", "exists": False},
+            "ready": False,
+        }
+
+        text = format_report(report)
+
+        assert "setup hint:" in text
+        assert "mlx-audio[stt]" in text
+
+
+class TestPackaging:
+    def test_console_script_points_to_cli_main(self):
+        pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
+        pyproject = tomllib.loads(pyproject_path.read_text())
+
+        assert pyproject["project"]["scripts"]["stt-vibevoice-doctor"] == "stt_vibevoice.status:main"
+
+
+class TestStatusCLI:
+    def test_main_prints_json_report(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            status_module,
+            "doctor",
+            lambda: {
+                "platform": {"is_apple_silicon": True},
+                "binaries": {"ffmpeg": "/bin/ffmpeg", "ffprobe": "/bin/ffprobe"},
+                "modules": {module: True for module in REQUIRED_MODULES},
+                "runtime": {"configured": False},
+                "model_cache": {"path": "/tmp/cache", "exists": False},
+                "ready": True,
+            },
+        )
+
+        exit_code = main(["--json"])
+        captured = capsys.readouterr()
+        payload = json.loads(captured.out)
+
+        assert exit_code == 0
+        assert payload["ready"] is True
+
+    def test_main_can_fail_when_backend_not_ready(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            status_module,
+            "doctor",
+            lambda: {
+                "platform": {"system": "Darwin", "machine": "arm64", "is_apple_silicon": True},
+                "binaries": {"ffmpeg": "/bin/ffmpeg", "ffprobe": "/bin/ffprobe"},
+                "modules": {module: False for module in REQUIRED_MODULES},
+                "runtime": {"configured": False},
+                "model_cache": {"path": "/tmp/cache", "exists": False},
+                "ready": False,
+            },
+        )
+
+        exit_code = main(["--fail-if-not-ready"])
+        captured = capsys.readouterr()
+
+        assert exit_code == 1
+        assert "overall ready: no" in captured.out

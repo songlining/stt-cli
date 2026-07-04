@@ -66,13 +66,17 @@ public enum PythonTranscriber {
     /// Runs the Python backend's environment status report. This is safe for
     /// `doctor`: the Python module never imports MLX directly and exits zero
     /// even when the local transcription dependencies are missing.
-    public static func statusReport(workingDirectory: URL?, timeout: TimeInterval = 5) throws -> ProcessResult {
+    public static func statusReport(workingDirectory: URL?, timeout: TimeInterval = 5, requireReady: Bool = false) throws -> ProcessResult {
         guard let python = locatePython3() else {
             throw PythonTranscriberError.python3NotFound
         }
+        var arguments = ["-m", "stt_vibevoice.status"]
+        if requireReady {
+            arguments.append("--fail-if-not-ready")
+        }
         return try ProcessRunner.run(
             executablePath: python,
-            arguments: ["-m", "stt_vibevoice.status"],
+            arguments: arguments,
             currentDirectory: workingDirectory,
             timeout: timeout
         )

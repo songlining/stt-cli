@@ -5,9 +5,10 @@ import ArgumentParser
 @Suite("CLI parsing")
 struct CLIParsingTests {
 
-    @Test func doctorParsesPythonBackendOverride() throws {
-        let doctor = try Doctor.parse(["--python-backend", "/tmp/backend"])
+    @Test func doctorParsesPythonBackendOptions() throws {
+        let doctor = try Doctor.parse(["--python-backend", "/tmp/backend", "--require-backend-ready"])
         #expect(doctor.pythonBackend == "/tmp/backend")
+        #expect(doctor.requireBackendReady)
     }
 
     @Test func recordMicModeParsesOutputAndMode() throws {
@@ -64,7 +65,8 @@ struct CLIParsingTests {
             "--timeout", "30",
             "--model", "custom/model",
             "--max-new-tokens", "2048",
-            "--python-backend", "/tmp/backend"
+            "--python-backend", "/tmp/backend",
+            "--require-backend-ready"
         ])
         #expect(transcribe.audioPath == "meeting.wav")
         #expect(transcribe.output == "out.txt")
@@ -74,6 +76,7 @@ struct CLIParsingTests {
         #expect(transcribe.model == "custom/model")
         #expect(transcribe.maxNewTokens == 2048)
         #expect(transcribe.pythonBackend == "/tmp/backend")
+        #expect(transcribe.requireBackendReady)
     }
 
     @Test func transcribeRejectsNonPositiveTimeoutBeforeLaunchingBackend() throws {
@@ -112,7 +115,8 @@ struct CLIParsingTests {
             "--device", "cpu",
             "--model", "custom/model",
             "--max-new-tokens", "2048",
-            "--python-backend", "/tmp/backend"
+            "--python-backend", "/tmp/backend",
+            "--require-backend-ready"
         ])
         #expect(pipeline.mode == .meeting)
         #expect(pipeline.name == "Customer Call")
@@ -123,6 +127,7 @@ struct CLIParsingTests {
         #expect(pipeline.model == "custom/model")
         #expect(pipeline.maxNewTokens == 2048)
         #expect(pipeline.pythonBackend == "/tmp/backend")
+        #expect(pipeline.requireBackendReady)
     }
 
     @Test func pipelineRejectsInvalidDurationsBeforeStartingCapture() throws {

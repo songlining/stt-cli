@@ -35,11 +35,29 @@ This runs:
 - `swift test`
 - `swift run sttUnitChecks`
 - Python tests via `python/.venv/bin/python -m pytest python/tests`
+- Python backend status CLI JSON/readiness checks
 - App bundle build/sign smoke test
 - Bundled `doctor`
 - Codesign verification
 - Finite mic recording smoke test
+- Optional system fallback smoke test when `STT_SYSTEM_DEVICE` is set
 - Pipeline metadata smoke test
+- Standalone transcribe smoke test with a generated fake backend
+- Successful pipeline smoke test with a generated fake backend
+
+By default validation allows the transcription backend to be missing MLX dependencies, so recording and metadata checks still run on a fresh machine. To require full backend readiness:
+
+```bash
+STT_REQUIRE_BACKEND_READY=1 ./scripts/validate.sh
+```
+
+To validate a routed virtual/aggregate system-audio device, first route audio into the device, then run:
+
+```bash
+STT_SYSTEM_DEVICE="BlackHole 2ch" ./scripts/validate.sh
+```
+
+The optional check fails if the system fallback output is header-only/suspiciously small.
 
 ## Build app bundle
 
@@ -47,6 +65,7 @@ This runs:
 ./scripts/build-app-bundle.sh
 ./dist/stt.app/Contents/MacOS/stt doctor
 ./dist/stt.app/Contents/MacOS/stt doctor --python-backend ./python
+./dist/stt.app/Contents/MacOS/stt doctor --require-backend-ready
 ```
 
 The app bundle uses bundle identifier `com.hashicorp.stt` by default and packages the local `python/stt_vibevoice` module under `Contents/Resources/python`, so `doctor`, `transcribe`, and `pipeline` can locate the backend module even when launched outside the repo root. Python dependencies still come from the selected Python environment.
@@ -72,6 +91,14 @@ STT_RESET_TCC=1 ./scripts/manual-tcc-smoke.sh
 ```
 
 When using `STT_RESET_TCC=1`, confirm the macOS microphone prompt is attributed to `stt` / `com.hashicorp.stt`, not Terminal.
+
+To also validate a routed virtual/aggregate system-audio device during the manual smoke test:
+
+```bash
+STT_SYSTEM_DEVICE="BlackHole 2ch" ./scripts/manual-tcc-smoke.sh
+```
+
+The script fails if either mic or optional system fallback recording is header-only/suspiciously small.
 
 ## Common commands
 
@@ -107,6 +134,15 @@ STT_HOME=/tmp/stt-run \
   --max-new-tokens 4096
 ```
 
+Fail before recording if the transcription backend is not ready:
+
+```bash
+./dist/stt.app/Contents/MacOS/stt pipeline \
+  --mode mic \
+  --duration 2 \
+  --require-backend-ready
+```
+
 If MLX/mlx-audio is not installed, the pipeline records audio and writes failure details into `metadata.json`.
 
 Transcribe an existing audio file with explicit backend settings:
@@ -119,12 +155,20 @@ Transcribe an existing audio file with explicit backend settings:
   --timeout 300 \
   --model mlx-community/VibeVoice-ASR-8bit \
   --max-new-tokens 4096 \
-  --python-backend ./python
+  --python-backend ./python \
+  --require-backend-ready
 ```
 
 ## Python backend readiness
 
-`stt doctor` prints Python backend readiness. The backend is ready only when Apple Silicon, ffmpeg/ffprobe, and required modules are available. Backend lookup order is:
+`stt doctor` prints Python backend readiness and an actionable setup hint when dependencies are missing. Add `--require-backend-ready` when you want `doctor` to exit non-zero unless the transcription backend is fully ready. The backend is ready only when Apple Silicon, ffmpeg/ffprobe, and required modules are available. The Python status module also supports machine-readable checks:
+
+```bash
+python3 -m stt_vibevoice.status --json
+python3 -m stt_vibevoice.status --fail-if-not-ready
+```
+
+Backend lookup order is:
 
 1. explicit `--python-backend <dir>` on `doctor` / `transcribe` / `pipeline`
 2. `STT_PYTHON_BACKEND`
@@ -132,7 +176,26 @@ Transcribe an existing audio file with explicit backend settings:
 4. `stt.app/Contents/Resources/python`
 
 
-Install backend dependencies in the Python environment you plan to use:
+Bootstrap the local Python backend environment without MLX (fast/dev default):
+
+```bash
+./scripts/bootstrap-python-backend.sh
+```
+
+Install the MLX/VibeVoice dependencies and check readiness:
+
+```bash
+./scripts/bootstrap-python-backend.sh --mlx --check
+```
+
+For a separate runtime root:
+
+```bash
+STT_VIBEVOICE_RUNTIME=/opt/stt-runtime ./scripts/bootstrap-python-backend.sh --mlx
+export STT_VIBEVOICE_RUNTIME=/opt/stt-runtime
+```
+
+Equivalent manual install commands:
 
 ```bash
 python3 -m pip install --upgrade pip setuptools wheel

@@ -20,7 +20,7 @@ dev = [
 ]
 
 [project.scripts]
-stt-vibevoice-doctor = "stt_vibevoice.status:doctor"
+stt-vibevoice-doctor = "stt_vibevoice.status:main"
 
 [tool.setuptools]
 packages = ["stt_vibevoice"]

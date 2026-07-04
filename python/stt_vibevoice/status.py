@@ -8,10 +8,13 @@ dependency, missing binary, or unset env var just shows up as ``False``/
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
+import json
 import os
 import platform
 import shutil
+import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -163,6 +166,43 @@ def doctor() -> Dict[str, Any]:
     return report
 
 
+def missing_requirements(report: Dict[str, Any]) -> list[str]:
+    """Return human-readable blockers that keep the backend from being ready."""
+    missing: list[str] = []
+
+    platform_info = report.get("platform", {})
+    if not platform_info.get("is_apple_silicon"):
+        missing.append("Apple Silicon macOS")
+
+    binaries = report.get("binaries", {})
+    for name in ("ffmpeg", "ffprobe"):
+        if not binaries.get(name):
+            missing.append(name)
+
+    modules = report.get("modules", {})
+    for name in REQUIRED_MODULES:
+        if not modules.get(name):
+            missing.append(f"python module {name}")
+
+    return missing
+
+
+def setup_hint(report: Dict[str, Any]) -> str:
+    """Return an actionable setup hint for missing backend dependencies."""
+    missing = missing_requirements(report)
+    if not missing:
+        return "backend ready; no setup needed"
+
+    commands = [
+        "python3 -m pip install --upgrade pip setuptools wheel",
+        "python3 -m pip install 'mlx-audio[stt]'",
+    ]
+    return "missing: {}; setup: {}".format(
+        ", ".join(missing),
+        " && ".join(commands),
+    )
+
+
 def format_report(report: Dict[str, Any]) -> str:
     """Render a doctor() report as human-readable text for CLI output."""
     lines = []
@@ -204,8 +244,39 @@ def format_report(report: Dict[str, Any]) -> str:
     )
 
     lines.append("overall ready: {}".format("yes" if report.get("ready") else "no"))
+    if not report.get("ready"):
+        lines.append(f"setup hint: {setup_hint(report)}")
     return "\n".join(lines)
 
 
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python3 -m stt_vibevoice.status",
+        description="Check local readiness for the MLX VibeVoice transcription backend.",
+    )
+    parser.add_argument("--json", action="store_true", help="Print the structured status report as JSON")
+    parser.add_argument(
+        "--fail-if-not-ready",
+        action="store_true",
+        help="Exit non-zero when required backend dependencies are missing",
+    )
+    return parser
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
+    report = doctor()
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_report(report))
+
+    if args.fail_if_not_ready and not report.get("ready"):
+        return 1
+    return 0
+
+
 if __name__ == "__main__":
-    print(format_report(doctor()))
+    sys.exit(main())

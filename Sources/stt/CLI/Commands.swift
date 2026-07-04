@@ -30,6 +30,9 @@ public struct Doctor: ParsableCommand {
     @Option(name: .long, help: "Path to the Python backend directory containing stt_vibevoice.")
     public var pythonBackend: String?
 
+    @Flag(name: .long, help: "Exit non-zero if the Python transcription backend is not ready.")
+    public var requireBackendReady: Bool = false
+
     public init() {}
 
     public func run() throws {
@@ -67,10 +70,11 @@ public struct Doctor: ParsableCommand {
         print("  falls back to named virtual input device (e.g. BlackHole) — see `stt devices`.")
 
         print("Transcription backend:")
+        var backendReadyFailure: String?
         do {
             if let backendDir = try Transcribe.resolvePythonBackendDirectory(overridePath: pythonBackend) {
                 print("  backend path: \(backendDir.path)")
-                let status = try PythonTranscriber.statusReport(workingDirectory: backendDir, timeout: 5)
+                let status = try PythonTranscriber.statusReport(workingDirectory: backendDir, timeout: 5, requireReady: requireBackendReady)
                 let output = status.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
                 if output.isEmpty {
                     print("  status: no output from python backend status check")
@@ -83,12 +87,18 @@ public struct Doctor: ParsableCommand {
                     print("  status check exited with code \(status.exitCode)")
                     let stderr = status.standardError.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !stderr.isEmpty { print("  stderr: \(stderr)") }
+                    backendReadyFailure = "Python transcription backend is not ready"
                 }
             } else {
                 print("  python backend directory not found (set --python-backend or STT_PYTHON_BACKEND)")
+                backendReadyFailure = "Python transcription backend directory not found"
             }
         } catch {
             print("  status check failed: \(error.localizedDescription)")
+            backendReadyFailure = error.localizedDescription
+        }
+        if requireBackendReady, let backendReadyFailure {
+            throw ValidationError(backendReadyFailure)
         }
     }
 
@@ -344,6 +354,9 @@ public struct Transcribe: ParsableCommand {
     @Option(name: .long, help: "Path to the Python backend directory containing stt_vibevoice.")
     public var pythonBackend: String?
 
+    @Flag(name: .long, help: "Check backend readiness before transcribing and fail early if dependencies are missing.")
+    public var requireBackendReady: Bool = false
+
     public init() {}
 
     public func run() throws {
@@ -355,6 +368,10 @@ public struct Transcribe: ParsableCommand {
         }
 
         let workingDir = try Self.resolvePythonBackendDirectory(overridePath: pythonBackend)
+        if requireBackendReady {
+            try Self.requirePythonBackendReady(workingDirectory: workingDir, timeout: timeout)
+        }
+
         let result = try PythonTranscriber.transcribe(
             audioPath: audioPath,
             outputTextPath: output,
@@ -394,6 +411,17 @@ public struct Transcribe: ParsableCommand {
             }
         }
         return nil
+    }
+
+    public static func requirePythonBackendReady(workingDirectory: URL?, timeout: Double? = nil) throws {
+        let status = try PythonTranscriber.statusReport(
+            workingDirectory: workingDirectory,
+            timeout: timeout ?? 5,
+            requireReady: true
+        )
+        guard status.succeeded else {
+            throw ValidationError("Python transcription backend is not ready")
+        }
     }
 
     public static func resolvePythonBackendDirectory(overridePath: String?, fileManager: FileManager = .default) throws -> URL? {
@@ -445,6 +473,9 @@ public struct Pipeline: ParsableCommand {
     @Option(name: .long, help: "Path to the Python backend directory containing stt_vibevoice.")
     public var pythonBackend: String?
 
+    @Flag(name: .long, help: "Check backend readiness before recording and fail early if dependencies are missing.")
+    public var requireBackendReady: Bool = false
+
     public init() {}
 
     public func run() throws {
@@ -456,6 +487,11 @@ public struct Pipeline: ParsableCommand {
         }
         if let maxNewTokens, maxNewTokens <= 0 {
             throw ValidationError("--max-new-tokens must be greater than 0")
+        }
+
+        let backendDir = try Transcribe.resolvePythonBackendDirectory(overridePath: pythonBackend)
+        if requireBackendReady {
+            try Transcribe.requirePythonBackendReady(workingDirectory: backendDir, timeout: transcribeTimeout)
         }
 
         let runID = Paths.timestampToken()
@@ -527,7 +563,7 @@ public struct Pipeline: ParsableCommand {
                 outputTextPath: transcriptTextURL.path,
                 outputJSONPath: transcriptJSONURL.path,
                 device: device.rawValue,
-                workingDirectory: try Transcribe.resolvePythonBackendDirectory(overridePath: pythonBackend),
+                workingDirectory: backendDir,
                 timeout: transcribeTimeout,
                 modelPath: model,
                 maxNewTokens: maxNewTokens
