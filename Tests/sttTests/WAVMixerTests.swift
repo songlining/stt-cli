@@ -40,6 +40,15 @@ struct WAVMixerTests {
         #expect(mixed.samples == [20_000, 32_767, -32_768, 123])
     }
 
+    @Test func mixRejectsNonSixteenBitDepthConstructedDirectly() {
+        let lhs = WAVPCMFile(sampleRate: 16_000, bitDepth: 8, samples: [1])
+        let rhs = WAVPCMFile(sampleRate: 16_000, samples: [1])
+
+        #expect(throws: WAVMixerError.self) {
+            try WAVMixer.mix(lhs, rhs)
+        }
+    }
+
     @Test func rejectsSampleRateMismatch() {
         let lhs = WAVPCMFile(sampleRate: 16_000, samples: [1])
         let rhs = WAVPCMFile(sampleRate: 44_100, samples: [1])
@@ -109,6 +118,15 @@ struct WAVMixerTests {
     @Test func parseRejectsNon16BitDepth() {
         var data = WAVPCMFile(sampleRate: 8_000, samples: [1]).encodedData()
         replaceUInt16LE(8, in: &data, at: 34)
+
+        #expect(throws: WAVMixerError.self) {
+            try WAVPCMFile.parse(data)
+        }
+    }
+
+    @Test func parseRejectsZeroChannels() {
+        var data = WAVPCMFile(sampleRate: 8_000, samples: [1]).encodedData()
+        replaceUInt16LE(0, in: &data, at: 22)
 
         #expect(throws: WAVMixerError.self) {
             try WAVPCMFile.parse(data)

@@ -185,6 +185,24 @@ func runChecks() throws {
         try check(reason.contains("sample rate"), "WAV parser zero sample rate error")
     }
     do {
+        var zeroChannels = WAVPCMFile(sampleRate: 8_000, samples: [1]).encodedData()
+        zeroChannels[22] = 0
+        zeroChannels[23] = 0
+        _ = try WAVPCMFile.parse(zeroChannels)
+        throw CheckFailure(message: "WAV parser should reject zero channels")
+    } catch WAVMixerError.unsupportedFormat(let reason) {
+        try check(reason.contains("channel count"), "WAV parser zero channels error")
+    }
+    do {
+        _ = try WAVMixer.mix(
+            WAVPCMFile(sampleRate: 8_000, bitDepth: 8, samples: [1]),
+            WAVPCMFile(sampleRate: 8_000, samples: [1])
+        )
+        throw CheckFailure(message: "WAV mixer should reject non-16-bit direct input")
+    } catch WAVMixerError.unsupportedFormat(let reason) {
+        try check(reason.contains("16-bit"), "WAV mixer non-16-bit direct input error")
+    }
+    do {
         let misaligned = WAVWriter.header(sampleRate: 8_000, channels: 2, bitDepth: 16, dataSize: 2) + Data([0, 0])
         _ = try WAVPCMFile.parse(misaligned)
         throw CheckFailure(message: "WAV parser should reject misaligned data")
