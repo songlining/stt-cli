@@ -37,7 +37,7 @@ public struct NativeTapAvailability: Equatable, Codable {
 
     public var summary: String {
         if isPotentiallyAvailable {
-            return "CoreAudio process-tap symbols appear available, but capture wiring is not implemented yet."
+            return "CoreAudio process-tap symbols appear available; native system-audio capture is enabled with named input-device fallback."
         }
         var missing: [String] = []
         if !osVersionSupported { missing.append("macOS 14.4+") }
@@ -76,7 +76,7 @@ public struct NativeTapDiagnostic: Equatable, Codable {
             return "CoreAudio process-tap symbols appear available. Create/destroy diagnostic not run; set STT_NATIVE_TAP_DIAGNOSTIC=1 to attempt it."
         }
         if createDestroySucceeded == true {
-            return "CoreAudio process-tap create/destroy diagnostic succeeded. Capture wiring is still not implemented yet."
+            return "CoreAudio process-tap create/destroy diagnostic succeeded; native system-audio capture is enabled."
         }
         let create = createOSStatus.map(String.init) ?? "not attempted"
         let destroy = destroyOSStatus.map(String.init) ?? "not attempted"
