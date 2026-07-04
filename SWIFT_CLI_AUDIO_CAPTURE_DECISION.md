@@ -147,6 +147,29 @@ stt-cli/
             └── SessionState.swift
 ```
 
+## Current Implementation Status
+
+As of this iteration, the Swift CLI has progressed through the low-risk foundation work and validation harnesses:
+
+- CLI commands exist for `doctor`, `devices`, `record`, `transcribe`, `pipeline`, and `permissions`.
+- Finite recording with `--duration` is implemented for repeatable smoke tests.
+- Microphone recording works through the bundled app and produces valid WAV output in `scripts/validate.sh`.
+- A local `.app` wrapper is built by `scripts/build-app-bundle.sh`, ad-hoc signed with microphone entitlement, and verified by `codesign`.
+- The local Python backend module is packaged into `stt.app/Contents/Resources/python` and can be located when launched outside the repo.
+- `stt doctor` reports bundle attribution, permission status, native CoreAudio process-tap symbol availability, and Python backend readiness with actionable setup hints.
+- `stt transcribe` and `stt pipeline` support bounded backend calls (`--timeout` / `--transcribe-timeout`), explicit backend selection (`--python-backend`), model options, and `--require-backend-ready` preflight checks.
+- Pipeline metadata (`metadata.json`) is written for both failure and success paths.
+- `scripts/validate.sh` covers Swift tests, Python tests, app bundle build/sign, bundled backend lookup, strict readiness semantics, mic smoke recording, optional system-fallback validation, failure metadata, and successful fake-backend transcribe/pipeline smoke tests.
+- `scripts/manual-tcc-smoke.sh` supports opt-in TCC reset and optional routed system fallback smoke testing.
+
+Still incomplete:
+
+- Native CoreAudio process-tap system-output capture is probed but not wired.
+- Fresh TCC prompt attribution still requires a user-visible manual reset run: `STT_RESET_TCC=1 ./scripts/manual-tcc-smoke.sh`.
+- Full real transcription requires installing MLX/mlx-audio dependencies, e.g. `./scripts/bootstrap-python-backend.sh --mlx --check`.
+- BlackHole/Aggregate-device system fallback requires real routed audio and should be validated with `STT_SYSTEM_DEVICE="BlackHole 2ch" ./scripts/validate.sh`.
+- Developer ID signing, notarization, and distribution packaging are not implemented.
+
 ## Implementation Plan
 
 ### Phase 1: Swift CLI skeleton + TCC attribution spike (riskiest-first)
