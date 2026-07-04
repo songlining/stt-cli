@@ -200,6 +200,45 @@ struct CLIParsingTests {
         }
     }
 
+    @Test func mixSucceedsAndWritesDefaultMixedFileNextToFirstInput() throws {
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let micURL = tmpDir.appendingPathComponent("mic.wav")
+        let systemURL = tmpDir.appendingPathComponent("system.wav")
+        let mixedURL = tmpDir.appendingPathComponent("mixed.wav")
+        try WAVPCMFile(sampleRate: 8_000, samples: [1_000, 2_000]).encodedData().write(to: micURL)
+        try WAVPCMFile(sampleRate: 8_000, samples: [3_000]).encodedData().write(to: systemURL)
+
+        let mix = try Mix.parse([micURL.path, systemURL.path])
+        try mix.run()
+
+        #expect(FileManager.default.fileExists(atPath: mixedURL.path))
+        let mixed = try WAVPCMFile.parse(Data(contentsOf: mixedURL))
+        #expect(mixed.samples == [4_000, 2_000])
+    }
+
+    @Test func mixFailIfEmptyThrowsWhenMixedOutputIsTooSmall() throws {
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let micURL = tmpDir.appendingPathComponent("mic.wav")
+        let systemURL = tmpDir.appendingPathComponent("system.wav")
+        let mixedURL = tmpDir.appendingPathComponent("mixed.wav")
+        try WAVPCMFile(sampleRate: 8_000, samples: [1]).encodedData().write(to: micURL)
+        try WAVPCMFile(sampleRate: 8_000, samples: [1]).encodedData().write(to: systemURL)
+
+        let mix = try Mix.parse([micURL.path, systemURL.path, "--output", mixedURL.path, "--fail-if-empty"])
+        do {
+            try mix.run()
+            Issue.record("Expected fail-if-empty to reject tiny mixed output")
+        } catch {
+            #expect(error.localizedDescription.contains("WARNING: output file is very small"))
+        }
+    }
+
     @Test func pipelineRejectsInvalidDurationsBeforeStartingCapture() throws {
         let invalidDuration = try Pipeline.parse(["--duration", "0"])
         #expect(throws: (any Error).self) {
