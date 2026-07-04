@@ -37,7 +37,7 @@ struct PipelineMeetingAudioSelectionTests {
         let systemURL = tmpDir.appendingPathComponent("system.wav")
         let mixedURL = tmpDir.appendingPathComponent("mixed.wav")
         try WAVPCMFile(sampleRate: 16_000, samples: [1]).encodedData().write(to: micURL)
-        try WAVPCMFile(sampleRate: 44_100, samples: [1]).encodedData().write(to: systemURL)
+        try Data("not a wav".utf8).write(to: systemURL)
 
         let selection = Pipeline.resolveMeetingAudioSource(micURL: micURL, systemURL: systemURL, mixedURL: mixedURL)
 

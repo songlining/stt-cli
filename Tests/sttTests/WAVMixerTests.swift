@@ -49,13 +49,25 @@ struct WAVMixerTests {
         }
     }
 
-    @Test func rejectsSampleRateMismatch() {
-        let lhs = WAVPCMFile(sampleRate: 16_000, samples: [1])
-        let rhs = WAVPCMFile(sampleRate: 44_100, samples: [1])
+    @Test func mixResamplesDifferingSampleRatesToHigherRate() throws {
+        let lhs = WAVPCMFile(sampleRate: 10, samples: [0, 100])
+        let rhs = WAVPCMFile(sampleRate: 20, samples: [0, 0, 0, 0])
 
-        #expect(throws: WAVMixerError.self) {
-            try WAVMixer.mix(lhs, rhs)
-        }
+        let mixed = try WAVMixer.mix(lhs, rhs)
+
+        #expect(mixed.sampleRate == 20)
+        #expect(mixed.samples == [0, 50, 100, 100])
+    }
+
+    @Test func mixUpsamplesCommonMeetingSampleRateMismatch() throws {
+        let lhs = WAVPCMFile(sampleRate: 44_100, samples: Array(repeating: Int16(1_000), count: 441))
+        let rhs = WAVPCMFile(sampleRate: 48_000, samples: Array(repeating: Int16(1_000), count: 480))
+
+        let mixed = try WAVMixer.mix(lhs, rhs)
+
+        #expect(mixed.sampleRate == 48_000)
+        #expect(mixed.samples.count == 480)
+        #expect(mixed.samples.allSatisfy { $0 == 2_000 })
     }
 
     @Test func parseRejectsTooShortData() {
@@ -168,6 +180,27 @@ struct WAVMixerTests {
         #expect(result.durationSeconds == 0.00025)
         #expect(result.fileSizeBytes == UInt64(44 + 4))
         #expect(parsed.samples == [4_000, 2_000])
+    }
+
+    @Test func mixFilesSucceedsWithDifferingCommonSampleRates() throws {
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let lhsURL = tmpDir.appendingPathComponent("mic.wav")
+        let rhsURL = tmpDir.appendingPathComponent("system.wav")
+        let outURL = tmpDir.appendingPathComponent("mixed.wav")
+        try WAVPCMFile(sampleRate: 44_100, samples: Array(repeating: Int16(1_000), count: 441)).encodedData().write(to: lhsURL)
+        try WAVPCMFile(sampleRate: 48_000, samples: Array(repeating: Int16(1_000), count: 480)).encodedData().write(to: rhsURL)
+
+        let result = try WAVMixer.mixFiles(lhsURL, rhsURL, outputURL: outURL)
+        let parsed = try WAVPCMFile.parse(Data(contentsOf: outURL))
+
+        #expect(result.outputURL == outURL)
+        #expect(result.durationSeconds == 0.01)
+        #expect(parsed.sampleRate == 48_000)
+        #expect(parsed.samples.count == 480)
+        #expect(parsed.samples.allSatisfy { $0 == 2_000 })
     }
 
     @Test func driftWarningReturnsNilWhenDurationsAreClose() throws {

@@ -253,7 +253,7 @@ func runChecks() throws {
     let fallbackSystemURL = meetingFallbackDir.appendingPathComponent("system.wav")
     let fallbackMixedURL = meetingFallbackDir.appendingPathComponent("mixed.wav")
     try WAVPCMFile(sampleRate: 16_000, samples: [1]).encodedData().write(to: fallbackMicURL)
-    try WAVPCMFile(sampleRate: 44_100, samples: [1]).encodedData().write(to: fallbackSystemURL)
+    try Data("not a wav".utf8).write(to: fallbackSystemURL)
     let fallbackSelection = Pipeline.resolveMeetingAudioSource(micURL: fallbackMicURL, systemURL: fallbackSystemURL, mixedURL: fallbackMixedURL)
     try checkEqual(fallbackSelection.audioToTranscribeURL, fallbackMicURL, "meeting pipeline falls back to mic track")
     try checkEqual(fallbackSelection.outputURLs, [fallbackMicURL, fallbackSystemURL], "meeting pipeline fallback output paths")
@@ -284,7 +284,7 @@ func runChecks() throws {
     let recordFallbackSystemURL = recordFallbackDir.appendingPathComponent("system.wav")
     let recordFallbackMixedURL = recordFallbackDir.appendingPathComponent("mixed.wav")
     try WAVPCMFile(sampleRate: 16_000, samples: [1]).encodedData().write(to: recordFallbackMicURL)
-    try WAVPCMFile(sampleRate: 44_100, samples: [1]).encodedData().write(to: recordFallbackSystemURL)
+    try Data("not a wav".utf8).write(to: recordFallbackSystemURL)
     let recordFallbackOutcome = Record.resolveMeetingMixOutcome(
         micResult: RecordingResult(outputURL: recordFallbackMicURL, durationSeconds: 0.1, fileSizeBytes: 46),
         systemResult: RecordingResult(outputURL: recordFallbackSystemURL, durationSeconds: 0.1, fileSizeBytes: 46),

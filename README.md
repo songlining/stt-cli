@@ -167,7 +167,7 @@ Record using a named virtual input device fallback:
 ./dist/stt.app/Contents/MacOS/stt record --mode system --input-device "BlackHole 2ch" --duration 5 --fail-if-empty --output /tmp/system.wav
 ```
 
-Record meeting tracks and attempt a post-capture `mixed.wav` when both tracks are compatible 16-bit PCM WAV:
+Record meeting tracks and attempt a post-capture `mixed.wav` when both tracks are compatible 16-bit PCM WAV. If mic/system sample rates differ, mix-down upsamples the lower-rate track to the higher rate before mixing:
 
 ```bash
 ./dist/stt.app/Contents/MacOS/stt record --mode meeting --input-device "BlackHole 2ch" --duration 5 --output-dir /tmp/meeting

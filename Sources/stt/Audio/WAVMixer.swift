@@ -3,6 +3,9 @@ import Foundation
 public enum WAVMixerError: Error, LocalizedError {
     case invalidHeader(String)
     case unsupportedFormat(String)
+    // Retained for source compatibility with earlier callers. `WAVMixer.mix`
+    // now resamples differing sample rates to the higher rate instead of
+    // throwing this error.
     case sampleRateMismatch(UInt32, UInt32)
 
     public var errorDescription: String? {
@@ -108,22 +111,49 @@ public enum WAVMixer {
     public static let defaultDriftWarningThresholdSeconds: Double = 0.25
 
     public static func mix(_ lhs: WAVPCMFile, _ rhs: WAVPCMFile) throws -> WAVPCMFile {
-        guard lhs.sampleRate == rhs.sampleRate else {
-            throw WAVMixerError.sampleRateMismatch(lhs.sampleRate, rhs.sampleRate)
-        }
         guard lhs.bitDepth == 16, rhs.bitDepth == 16 else {
             throw WAVMixerError.unsupportedFormat("only 16-bit PCM is supported")
         }
+        guard lhs.sampleRate > 0, rhs.sampleRate > 0 else {
+            throw WAVMixerError.unsupportedFormat("sample rate must be greater than 0")
+        }
 
-        let count = max(lhs.samples.count, rhs.samples.count)
+        let targetRate = max(lhs.sampleRate, rhs.sampleRate)
+        let lhsSamples = resample(lhs.samples, from: lhs.sampleRate, to: targetRate)
+        let rhsSamples = resample(rhs.samples, from: rhs.sampleRate, to: targetRate)
+        let count = max(lhsSamples.count, rhsSamples.count)
         var mixed: [Int16] = []
         mixed.reserveCapacity(count)
         for index in 0..<count {
-            let a = index < lhs.samples.count ? Int(lhs.samples[index]) : 0
-            let b = index < rhs.samples.count ? Int(rhs.samples[index]) : 0
+            let a = index < lhsSamples.count ? Int(lhsSamples[index]) : 0
+            let b = index < rhsSamples.count ? Int(rhsSamples[index]) : 0
             mixed.append(Int16(clamping: a + b))
         }
-        return WAVPCMFile(sampleRate: lhs.sampleRate, samples: mixed)
+        return WAVPCMFile(sampleRate: targetRate, samples: mixed)
+    }
+
+    private static func resample(_ samples: [Int16], from sourceRate: UInt32, to targetRate: UInt32) -> [Int16] {
+        guard sourceRate != targetRate, sourceRate > 0, targetRate > 0, !samples.isEmpty else {
+            return samples
+        }
+
+        let ratio = Double(targetRate) / Double(sourceRate)
+        let outputCount = Int((Double(samples.count) * ratio).rounded())
+        guard outputCount > 0 else { return [] }
+
+        let lastIndex = samples.count - 1
+        var output: [Int16] = []
+        output.reserveCapacity(outputCount)
+        for index in 0..<outputCount {
+            let sourcePosition = Double(index) / ratio
+            let sourceIndex = min(Int(sourcePosition), lastIndex)
+            let fraction = sourcePosition - Double(sourceIndex)
+            let first = Double(samples[sourceIndex])
+            let second = Double(samples[min(sourceIndex + 1, lastIndex)])
+            let interpolated = first + ((second - first) * fraction)
+            output.append(Int16(clamping: Int(interpolated.rounded())))
+        }
+        return output
     }
 
     public static func driftWarning(lhsURL: URL,

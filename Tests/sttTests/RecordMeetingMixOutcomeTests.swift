@@ -32,7 +32,7 @@ struct RecordMeetingMixOutcomeTests {
         #expect(mixed.samples == [4_000, 2_000])
     }
 
-    @Test func fallsBackWithNoteWhenSampleRatesMismatch() throws {
+    @Test func fallsBackWithNoteWhenMixingFails() throws {
         let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tmpDir) }
@@ -41,7 +41,7 @@ struct RecordMeetingMixOutcomeTests {
         let systemURL = tmpDir.appendingPathComponent("system.wav")
         let mixedURL = tmpDir.appendingPathComponent("mixed.wav")
         try WAVPCMFile(sampleRate: 16_000, samples: [1]).encodedData().write(to: micURL)
-        try WAVPCMFile(sampleRate: 44_100, samples: [1]).encodedData().write(to: systemURL)
+        try Data("not a wav".utf8).write(to: systemURL)
 
         let outcome = Record.resolveMeetingMixOutcome(
             micResult: RecordingResult(outputURL: micURL, durationSeconds: 0.1, fileSizeBytes: 46),
