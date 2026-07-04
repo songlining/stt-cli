@@ -128,6 +128,13 @@ func runChecks() throws {
     } catch {
         try check(error.localizedDescription.contains("Audio file not found: \(missingAudioFile.path)"), "mix missing input preflight message")
     }
+    try Pipeline.requireTranscribableAudio(at: existingAudioFile)
+    do {
+        try Pipeline.requireTranscribableAudio(at: emptyAudioFile)
+        throw CheckFailure(message: "pipeline empty transcribable audio should fail")
+    } catch {
+        try check(error.localizedDescription.contains("Audio file is empty (0 bytes): \(emptyAudioFile.path)"), "pipeline empty audio preflight message")
+    }
 
     let header = WAVWriter.header(sampleRate: 16_000, channels: 1, bitDepth: 16, dataSize: 32_000)
     try checkEqual(header.count, 44, "WAV header size")

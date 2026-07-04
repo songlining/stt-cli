@@ -624,6 +624,8 @@ public struct Pipeline: ParsableCommand {
                 }
             }
 
+            try Self.requireTranscribableAudio(at: audioToTranscribeURL)
+
             let result = try PythonTranscriber.transcribe(
                 audioPath: audioToTranscribeURL.path,
                 outputTextPath: transcriptTextURL.path,
@@ -654,6 +656,10 @@ public struct Pipeline: ParsableCommand {
         public let audioToTranscribeURL: URL
         public let outputURLs: [URL]
         public let note: String?
+    }
+
+    public static func requireTranscribableAudio(at url: URL) throws {
+        _ = try Paths.requireNonEmptyFile(url.path)
     }
 
     public static func resolveMeetingAudioSource(micURL: URL, systemURL: URL, mixedURL: URL) -> MeetingAudioSelection {
