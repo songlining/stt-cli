@@ -86,6 +86,10 @@ func runChecks() throws {
     let bundleDiagnostic = BundleAttribution.diagnosticLines(bundlePath: "/usr/local/bin/stt", bundleIdentifier: nil).joined(separator: "\n")
     try check(bundleDiagnostic.contains("./scripts/build-app-bundle.sh"), "bundle diagnostic includes build command")
 
+    let attributionGuidance = AudioPermissions.tccAttributionGuidance(bundleID: "com.example.stt")
+    try check(attributionGuidance.contains("./scripts/build-app-bundle.sh"), "TCC attribution guidance includes bundle build command")
+    try check(attributionGuidance.contains("STT_RESET_TCC=1 ./scripts/manual-tcc-smoke.sh"), "TCC attribution guidance includes smoke command")
+
     let microphoneGuidance = AudioPermissions.microphoneResetGuidance(bundleID: "com.example.stt")
     try check(microphoneGuidance.contains("tccutil reset Microphone com.example.stt"), "microphone guidance includes reset command")
 

@@ -65,14 +65,29 @@ public enum AudioPermissions {
 
     /// Human-readable guidance for recovering from a denied permission,
     /// including the relevant `tccutil reset` invocation.
+    public static func tccAttributionGuidance(bundleID: String) -> String {
+        """
+        TCC attribution guidance:
+          - Prefer running the bundled app wrapper so prompts are attributed to `stt`, not Terminal:
+              ./scripts/build-app-bundle.sh
+              ./dist/stt.app/Contents/MacOS/stt doctor
+          - To manually verify fresh microphone prompt attribution:
+              STT_RESET_TCC=1 ./scripts/manual-tcc-smoke.sh
+          - Expected bundle identifier: \(bundleID)
+        """
+    }
+
     public static func microphoneResetGuidance(bundleID: String) -> String {
         """
         Microphone access is currently denied for this tool.
 
         To reset and re-prompt:
           1. Run: tccutil reset Microphone \(bundleID)
-          2. Re-run the failing `stt` command; macOS should prompt again.
+          2. Re-run the failing bundled `stt` command; macOS should prompt again.
           3. Or manually enable it: System Settings > Privacy & Security > Microphone > \(bundleID)
+
+        For a full attribution smoke test, run:
+          STT_RESET_TCC=1 ./scripts/manual-tcc-smoke.sh
         """
     }
 
