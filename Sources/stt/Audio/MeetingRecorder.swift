@@ -35,11 +35,10 @@ public struct MeetingRecordingResult {
 /// BEST-EFFORT: single-file "mixed" output. True sample-accurate mixing of
 /// two independently-clocked AVAudioEngine/CoreAudio streams into one
 /// interleaved WAV would require a shared clock or an offline mixer pass
-/// after capture. For now, when `--separate-tracks` is not passed, this
-/// recorder still records both tracks separately (to avoid losing audio)
-/// and reports both output paths; a naive post-hoc mix-down is not
-/// performed. Callers/CLI should treat non-separate mode as "separate under
-/// the hood, single logical session" until true mixing lands.
+/// after capture. This recorder intentionally records both tracks separately
+/// (to avoid losing audio) and reports both output paths. CLI callers such as
+/// `record --mode meeting` and `pipeline --mode meeting` may then attempt a
+/// post-capture `WAVMixer` mix-down when both files are compatible PCM WAVs.
 public final class MeetingRecorder {
     private let micRecorder = MicRecorder()
     private let systemRecorder = SystemAudioRecorder()

@@ -159,6 +159,7 @@ As of this iteration, the Swift CLI has progressed through the low-risk foundati
 - `stt doctor` reports bundle attribution, permission status, native CoreAudio process-tap symbol availability, and Python backend readiness with actionable setup hints.
 - `stt transcribe` and `stt pipeline` support bounded backend calls (`--timeout` / `--transcribe-timeout`), explicit backend selection (`--python-backend`), model options, and `--require-backend-ready` preflight checks.
 - Pipeline metadata (`metadata.json`) is written for both failure and success paths.
+- Meeting pipelines record separate `mic.wav`/`system.wav` tracks, transcribe `mixed.wav` when compatible mix-down succeeds, and fall back to `mic.wav` with a metadata note when mixing fails.
 - `scripts/validate.sh` covers Swift tests, Python tests, app bundle build/sign, bundled backend lookup, strict readiness semantics, mic smoke recording, optional system-fallback validation, failure metadata, and successful fake-backend transcribe/pipeline smoke tests.
 - `scripts/manual-tcc-smoke.sh` supports opt-in TCC reset and optional routed system fallback smoke testing.
 

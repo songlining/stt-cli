@@ -15,6 +15,7 @@ Implemented:
 - Python backend diagnostics in `stt doctor`.
 - Pipeline metadata (`metadata.json`) written under each run directory.
 - Best-effort WAV mix-down for compatible meeting-mode `mic.wav` + `system.wav` tracks.
+- Meeting pipelines transcribe `mixed.wav` when mix-down succeeds and fall back to `mic.wav` with a metadata note when it does not.
 - Bounded validation script: `scripts/validate.sh`.
 
 Still incomplete:
@@ -146,7 +147,7 @@ Mix two existing compatible WAV tracks manually:
 ./dist/stt.app/Contents/MacOS/stt mix /tmp/meeting/mic.wav /tmp/meeting/system.wav --output /tmp/meeting/mixed.wav --fail-if-empty
 ```
 
-Run a bounded pipeline:
+Run a bounded microphone pipeline:
 
 ```bash
 STT_HOME=/tmp/stt-run \
@@ -169,6 +170,8 @@ Fail before recording if the transcription backend is not ready:
   --duration 2 \
   --require-backend-ready
 ```
+
+For meeting pipelines, the CLI records `mic.wav` and `system.wav`, attempts to create `mixed.wav`, and transcribes the mixed track when possible. If mix-down fails, it transcribes `mic.wav` and records the fallback note in `metadata.json`.
 
 If MLX/mlx-audio is not installed, the pipeline records audio and writes failure details into `metadata.json`.
 
