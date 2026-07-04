@@ -18,12 +18,14 @@ APP_BIN="${REPO_ROOT}/dist/stt.app/Contents/MacOS/stt"
 SMOKE_DIR="${SMOKE_DIR:-/tmp/stt-tcc-smoke}"
 MIC_WAV="${SMOKE_DIR}/mic.wav"
 
+source "${REPO_ROOT}/scripts/lib/bundle-check.sh"
 source "${REPO_ROOT}/scripts/lib/system-fallback-check.sh"
 
 cd "${REPO_ROOT}"
 
 print "== Build bundled app =="
 ./scripts/build-app-bundle.sh
+assert_app_bundle_tcc_configuration "${REPO_ROOT}/dist/stt.app" "${BUNDLE_ID}"
 
 if [[ "${STT_RESET_TCC:-0}" == "1" ]]; then
   print "== Reset microphone permission for ${BUNDLE_ID} =="

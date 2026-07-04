@@ -10,6 +10,7 @@ SMOKE_DIR="${SMOKE_DIR:-/tmp/stt-smoke-validate}"
 APP_BIN="${REPO_ROOT}/dist/stt.app/Contents/MacOS/stt"
 MIC_WAV="${SMOKE_DIR}/mic.wav"
 
+source "${REPO_ROOT}/scripts/lib/bundle-check.sh"
 source "${REPO_ROOT}/scripts/lib/system-fallback-check.sh"
 
 cd "${REPO_ROOT}"
@@ -19,6 +20,7 @@ zsh -n scripts/bootstrap-python-backend.sh
 zsh -n scripts/build-app-bundle.sh
 zsh -n scripts/manual-tcc-smoke.sh
 zsh -n scripts/validate.sh
+zsh -n scripts/lib/bundle-check.sh
 zsh -n scripts/lib/system-fallback-check.sh
 ./scripts/bootstrap-python-backend.sh --help >/dev/null
 
@@ -65,6 +67,7 @@ print "== App bundle =="
 ./scripts/build-app-bundle.sh
 "${APP_BIN}" doctor
 codesign --verify --deep --strict --verbose=2 dist/stt.app
+assert_app_bundle_tcc_configuration "${REPO_ROOT}/dist/stt.app" "${BUNDLE_ID:-com.hashicorp.stt}"
 
 PACKAGED_BACKEND="${REPO_ROOT}/dist/stt.app/Contents/Resources/python/stt_vibevoice/status.py"
 if [[ ! -f "${PACKAGED_BACKEND}" ]]; then

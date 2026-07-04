@@ -37,6 +37,7 @@ This runs:
 - Python tests via `python/.venv/bin/python -m pytest python/tests`
 - Python backend status CLI JSON/readiness checks
 - App bundle build/sign smoke test
+- Static app-bundle TCC metadata and entitlement checks
 - Bundled `doctor`
 - Codesign verification
 - Finite mic recording smoke test
