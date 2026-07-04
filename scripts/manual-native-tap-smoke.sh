@@ -66,8 +66,8 @@ if [[ ${RECORD_EXIT} -ne 0 ]]; then
   exit "${RECORD_EXIT}"
 fi
 
-if ! grep -q "native system-audio tap" "${SMOKE_DIR}/stdout.txt"; then
-  print -u2 "error: system recording completed but did not report native system-audio tap capture"
+if ! grep -Eq "Recording system audio via native CoreAudio process tap|native system-audio tap" "${SMOKE_DIR}/stdout.txt"; then
+  print -u2 "error: system recording completed but did not report native CoreAudio process-tap capture"
   print -u2 "This script validates the native CoreAudio path only, not the named input-device fallback."
   exit 1
 fi
