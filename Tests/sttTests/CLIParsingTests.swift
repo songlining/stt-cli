@@ -31,9 +31,10 @@ struct CLIParsingTests {
         #expect(record.inputDevice == "BlackHole 2ch")
     }
 
-    @Test func recordParsesOptionalDuration() throws {
-        let record = try Record.parse(["--mode", "mic", "--output", "timed.wav", "--duration", "1.5"])
+    @Test func recordParsesOptionalDurationAndFailIfEmpty() throws {
+        let record = try Record.parse(["--mode", "mic", "--output", "timed.wav", "--duration", "1.5", "--fail-if-empty"])
         #expect(record.duration == 1.5)
+        #expect(record.failIfEmpty)
     }
 
     @Test func recordMeetingModeWithSeparateTracksAndOutputDir() throws {
@@ -111,6 +112,7 @@ struct CLIParsingTests {
             "--name", "Customer Call",
             "--input-device", "BlackHole 2ch",
             "--duration", "5",
+            "--fail-if-empty",
             "--transcribe-timeout", "120",
             "--device", "cpu",
             "--model", "custom/model",
@@ -122,6 +124,7 @@ struct CLIParsingTests {
         #expect(pipeline.name == "Customer Call")
         #expect(pipeline.inputDevice == "BlackHole 2ch")
         #expect(pipeline.duration == 5)
+        #expect(pipeline.failIfEmpty)
         #expect(pipeline.transcribeTimeout == 120)
         #expect(pipeline.device == .cpu)
         #expect(pipeline.model == "custom/model")

@@ -155,6 +155,9 @@ public struct Record: ParsableCommand {
     @Option(name: .long, help: "Optional recording duration in seconds; omit to record until Ctrl-C.")
     public var duration: Double?
 
+    @Flag(name: .long, help: "Fail if the output looks header-only or contains no captured audio frames.")
+    public var failIfEmpty: Bool = false
+
     @Flag(name: .long, help: "For meeting mode, write mic and system audio to separate WAV files.")
     public var separateTracks: Bool = false
 
@@ -202,6 +205,7 @@ public struct Record: ParsableCommand {
 
         let result = waitForStopTriggerAndStop(duration: duration) { try recorder.stop() }
         report(result: result)
+        try enforceNonEmptyIfRequested(result)
     }
 
     private func runSystem() throws {
@@ -221,6 +225,7 @@ public struct Record: ParsableCommand {
 
         let result = waitForStopTriggerAndStop(duration: duration) { try recorder.stop() }
         report(result: result)
+        try enforceNonEmptyIfRequested(result)
     }
 
     private func runMeeting() throws {
@@ -263,6 +268,13 @@ public struct Record: ParsableCommand {
             print("System track: \(system.outputURL.path) (\(String(format: "%.1f", system.durationSeconds))s, \(formatFileSize(system.fileSizeBytes)))")
             if let warning = system.emptyAudioWarning { print(warning) }
         }
+        try enforceNonEmptyIfRequested(result.micResult)
+        try enforceNonEmptyIfRequested(result.systemResult)
+    }
+
+    private func enforceNonEmptyIfRequested(_ result: RecordingResult?) throws {
+        guard failIfEmpty, let result, !result.likelyContainsAudioData else { return }
+        throw ValidationError(result.emptyAudioWarning ?? "Recording output did not contain captured audio frames")
     }
 
     private func report(result: RecordingResult) {
@@ -458,6 +470,9 @@ public struct Pipeline: ParsableCommand {
     @Option(name: .long, help: "Optional recording duration in seconds; omit to record until Ctrl-C.")
     public var duration: Double?
 
+    @Flag(name: .long, help: "Fail if the recording output looks header-only before transcribing.")
+    public var failIfEmpty: Bool = false
+
     @Option(name: .long, help: "Optional transcription timeout in seconds.")
     public var transcribeTimeout: Double?
 
@@ -550,6 +565,7 @@ public struct Pipeline: ParsableCommand {
             record.mode = mode
             record.inputDevice = inputDevice
             record.duration = duration
+            record.failIfEmpty = failIfEmpty
             if mode == .meeting {
                 record.outputDir = runDir.path
                 record.separateTracks = true

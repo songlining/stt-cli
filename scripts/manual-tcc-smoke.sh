@@ -41,7 +41,7 @@ print "== Doctor should report .app bundle attribution =="
 
 print "== Finite mic recording smoke =="
 mkdir -p "${SMOKE_DIR}"
-"${APP_BIN}" record --mode mic --duration 2 --output "${MIC_WAV}"
+"${APP_BIN}" record --mode mic --duration 2 --fail-if-empty --output "${MIC_WAV}"
 ls -lh "${MIC_WAV}"
 ffprobe -v error -show_entries format=duration,size -of default=nw=1 "${MIC_WAV}"
 assert_audio_file_has_payload \

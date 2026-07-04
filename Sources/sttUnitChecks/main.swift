@@ -25,10 +25,11 @@ func runChecks() throws {
     let resetHelp = try Permissions.ResetHelp.parse(["--bundle-id", "com.example.stt"])
     try checkEqual(resetHelp.bundleID, "com.example.stt", "permissions reset-help bundle-id parses")
 
-    let record = try Record.parse(["--mode", "mic", "--output", "foo.wav", "--duration", "1.5"])
+    let record = try Record.parse(["--mode", "mic", "--output", "foo.wav", "--duration", "1.5", "--fail-if-empty"])
     try checkEqual(record.mode, .mic, "record mode parses")
     try checkEqual(record.output, "foo.wav", "record output parses")
     try checkEqual(record.duration, 1.5, "record duration parses")
+    try check(record.failIfEmpty, "record fail-if-empty parses")
 
     let system = try Record.parse(["--mode", "system", "--input-device", "BlackHole 2ch"])
     try checkEqual(system.mode, .system, "system mode parses")
@@ -51,7 +52,7 @@ func runChecks() throws {
 
     let pipeline = try Pipeline.parse([
         "--mode", "meeting", "--name", "Customer Call", "--input-device", "BlackHole 2ch",
-        "--duration", "5", "--transcribe-timeout", "120", "--device", "cpu",
+        "--duration", "5", "--fail-if-empty", "--transcribe-timeout", "120", "--device", "cpu",
         "--model", "custom/model", "--max-new-tokens", "2048", "--python-backend", "/tmp/backend",
         "--require-backend-ready"
     ])
@@ -59,6 +60,7 @@ func runChecks() throws {
     try checkEqual(pipeline.name, "Customer Call", "pipeline name parses")
     try checkEqual(pipeline.inputDevice, "BlackHole 2ch", "pipeline input device parses")
     try checkEqual(pipeline.duration, 5, "pipeline duration parses")
+    try check(pipeline.failIfEmpty, "pipeline fail-if-empty parses")
     try checkEqual(pipeline.transcribeTimeout, 120, "pipeline timeout parses")
     try checkEqual(pipeline.device, .cpu, "pipeline transcribe device parses")
     try checkEqual(pipeline.model, "custom/model", "pipeline model parses")

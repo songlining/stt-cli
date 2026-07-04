@@ -149,7 +149,7 @@ fi
 
 print "== Finite mic smoke test =="
 mkdir -p "${SMOKE_DIR}"
-"${APP_BIN}" record --mode mic --duration 2 --output "${MIC_WAV}"
+"${APP_BIN}" record --mode mic --duration 2 --fail-if-empty --output "${MIC_WAV}"
 ls -lh "${MIC_WAV}"
 ffprobe -v error -show_entries format=duration,size -of default=nw=1 "${MIC_WAV}"
 assert_audio_file_has_payload "${MIC_WAV}" "mic smoke test" "Check microphone permission and selected input device."
@@ -183,7 +183,7 @@ print "== Pipeline metadata smoke test =="
 PIPE_HOME="${SMOKE_DIR}/pipeline-home-$(date +%Y%m%d%H%M%S)"
 mkdir -p "${PIPE_HOME}"
 set +e
-STT_HOME="${PIPE_HOME}" "${APP_BIN}" pipeline --mode mic --name smoke --duration 1 --transcribe-timeout 5 --device cpu >"${PIPE_HOME}/stdout.txt" 2>"${PIPE_HOME}/stderr.txt"
+STT_HOME="${PIPE_HOME}" "${APP_BIN}" pipeline --mode mic --name smoke --duration 1 --fail-if-empty --transcribe-timeout 5 --device cpu >"${PIPE_HOME}/stdout.txt" 2>"${PIPE_HOME}/stderr.txt"
 PIPE_STATUS=$?
 set -e
 if [[ ${PIPE_STATUS} -eq 0 ]]; then
@@ -257,7 +257,7 @@ grep -q "fake transcript" "${FAKE_TRANSCRIBE_DIR}/stdout.txt"
 print "== Successful pipeline smoke test with fake backend =="
 FAKE_PIPE_HOME="${SMOKE_DIR}/pipeline-success-home-$(date +%Y%m%d%H%M%S)"
 mkdir -p "${FAKE_PIPE_HOME}"
-STT_HOME="${FAKE_PIPE_HOME}" "${APP_BIN}" pipeline --mode mic --name success --duration 1 --transcribe-timeout 5 --device cpu --python-backend "${FAKE_BACKEND}" >"${FAKE_PIPE_HOME}/stdout.txt" 2>"${FAKE_PIPE_HOME}/stderr.txt"
+STT_HOME="${FAKE_PIPE_HOME}" "${APP_BIN}" pipeline --mode mic --name success --duration 1 --fail-if-empty --transcribe-timeout 5 --device cpu --python-backend "${FAKE_BACKEND}" >"${FAKE_PIPE_HOME}/stdout.txt" 2>"${FAKE_PIPE_HOME}/stderr.txt"
 FAKE_METADATA_PATH="$(find "${FAKE_PIPE_HOME}" -maxdepth 4 -name metadata.json -type f | head -1)"
 if [[ -z "${FAKE_METADATA_PATH}" ]]; then
   print -u2 "error: successful fake-backend pipeline did not write metadata.json"

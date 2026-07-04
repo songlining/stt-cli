@@ -120,13 +120,13 @@ List input devices:
 Record microphone for two seconds:
 
 ```bash
-./dist/stt.app/Contents/MacOS/stt record --mode mic --duration 2 --output /tmp/mic.wav
+./dist/stt.app/Contents/MacOS/stt record --mode mic --duration 2 --fail-if-empty --output /tmp/mic.wav
 ```
 
 Record using a named virtual input device fallback:
 
 ```bash
-./dist/stt.app/Contents/MacOS/stt record --mode system --input-device "BlackHole 2ch" --duration 5 --output /tmp/system.wav
+./dist/stt.app/Contents/MacOS/stt record --mode system --input-device "BlackHole 2ch" --duration 5 --fail-if-empty --output /tmp/system.wav
 ```
 
 Run a bounded pipeline:
@@ -137,6 +137,7 @@ STT_HOME=/tmp/stt-run \
   --mode mic \
   --name smoke \
   --duration 2 \
+  --fail-if-empty \
   --transcribe-timeout 30 \
   --device cpu \
   --model mlx-community/VibeVoice-ASR-8bit \
