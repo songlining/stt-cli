@@ -35,6 +35,20 @@ func runChecks() throws {
     try checkEqual(system.mode, .system, "system mode parses")
     try checkEqual(system.inputDevice, "BlackHole 2ch", "input device parses")
 
+    let fixtureDevices = [
+        AudioDeviceInfo(id: 1, name: "External BlackHole Monitor", uid: "one", inputChannelCount: 2, isDefaultInput: false),
+        AudioDeviceInfo(id: 2, name: "BlackHole 2ch", uid: "two", inputChannelCount: 2, isDefaultInput: false),
+        AudioDeviceInfo(id: 3, name: "MacBook Pro Microphone", uid: "three", inputChannelCount: 1, isDefaultInput: true)
+    ]
+    try checkEqual(try DeviceList.selectInputDevice(named: "BlackHole 2ch", from: fixtureDevices).id, 2, "device exact match wins")
+    try checkEqual(try DeviceList.selectInputDevice(named: "blackhole", from: fixtureDevices).id, 1, "device substring match is case-insensitive and ordered")
+    do {
+        _ = try DeviceList.selectInputDevice(named: "Missing Device", from: fixtureDevices)
+        throw CheckFailure(message: "missing input device selection should fail")
+    } catch DeviceListError.deviceNotFound(let name) {
+        try checkEqual(name, "Missing Device", "device not found preserves requested name")
+    }
+
     let transcribe = try Transcribe.parse([
         "meeting.wav", "--output", "out.txt", "--json", "out.json", "--device", "gpu",
         "--timeout", "30", "--model", "custom/model", "--max-new-tokens", "2048",

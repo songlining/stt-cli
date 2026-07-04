@@ -64,7 +64,13 @@ public enum DeviceList {
 
     /// Resolves a device by exact or case-insensitive substring name match.
     public static func resolveInputDevice(named name: String) throws -> AudioDeviceInfo {
-        let devices = try inputDevices()
+        try selectInputDevice(named: name, from: inputDevices())
+    }
+
+    /// Pure selection helper used by `resolveInputDevice(named:)` after the
+    /// CoreAudio-backed device list has been collected. Kept separate so the
+    /// matching behavior is deterministic and unit-testable without hardware.
+    public static func selectInputDevice(named name: String, from devices: [AudioDeviceInfo]) throws -> AudioDeviceInfo {
         if let exact = devices.first(where: { $0.name == name }) {
             return exact
         }
