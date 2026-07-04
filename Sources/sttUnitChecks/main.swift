@@ -22,6 +22,9 @@ func runChecks() throws {
     try checkEqual(doctor.pythonBackend, "/tmp/backend", "doctor python backend parses")
     try check(doctor.requireBackendReady, "doctor require-backend-ready parses")
 
+    let resetHelp = try Permissions.ResetHelp.parse(["--bundle-id", "com.example.stt"])
+    try checkEqual(resetHelp.bundleID, "com.example.stt", "permissions reset-help bundle-id parses")
+
     let record = try Record.parse(["--mode", "mic", "--output", "foo.wav", "--duration", "1.5"])
     try checkEqual(record.mode, .mic, "record mode parses")
     try checkEqual(record.output, "foo.wav", "record output parses")

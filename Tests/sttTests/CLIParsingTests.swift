@@ -162,7 +162,10 @@ struct CLIParsingTests {
     }
 
     @Test func permissionsResetHelpSubcommandParses() throws {
-        let command = try STT.parseAsRoot(["permissions", "reset-help"])
+        let command = try STT.parseAsRoot(["permissions", "reset-help", "--bundle-id", "com.example.stt"])
         #expect(command is Permissions.ResetHelp)
+        if let resetHelp = command as? Permissions.ResetHelp {
+            #expect(resetHelp.bundleID == "com.example.stt")
+        }
     }
 }

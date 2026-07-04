@@ -605,10 +605,13 @@ public struct Permissions: ParsableCommand {
     public struct ResetHelp: ParsableCommand {
         public static let configuration = CommandConfiguration(commandName: "reset-help", abstract: "Print tccutil reset commands and manual recovery steps.")
 
+        @Option(name: .long, help: "Bundle identifier to use in tccutil reset guidance.")
+        public var bundleID: String?
+
         public init() {}
 
         public func run() throws {
-            let bundleID = Bundle.main.bundleIdentifier ?? "com.hashicorp.stt"
+            let bundleID = bundleID ?? Bundle.main.bundleIdentifier ?? "com.hashicorp.stt"
             print(AudioPermissions.tccAttributionGuidance(bundleID: bundleID))
             print("")
             print(AudioPermissions.microphoneResetGuidance(bundleID: bundleID))

@@ -102,6 +102,13 @@ STT_SYSTEM_DEVICE="BlackHole 2ch" ./scripts/manual-tcc-smoke.sh
 
 The script fails if either mic or optional system fallback recording is header-only/suspiciously small.
 
+Print permission reset guidance for the default bundle ID, or for a custom local bundle ID:
+
+```bash
+./dist/stt.app/Contents/MacOS/stt permissions reset-help
+./dist/stt.app/Contents/MacOS/stt permissions reset-help --bundle-id com.example.stt
+```
+
 ## Common commands
 
 List input devices:
