@@ -18,18 +18,21 @@ public enum SystemAudioCaptureMethod: String, Codable {
 public struct NativeTapAvailability: Equatable, Codable {
     public let osVersionSupported: Bool
     public let createProcessTapSymbolAvailable: Bool
+    public let destroyProcessTapSymbolAvailable: Bool
     public let createAggregateDeviceSymbolAvailable: Bool
 
     public init(osVersionSupported: Bool,
                 createProcessTapSymbolAvailable: Bool,
+                destroyProcessTapSymbolAvailable: Bool = true,
                 createAggregateDeviceSymbolAvailable: Bool) {
         self.osVersionSupported = osVersionSupported
         self.createProcessTapSymbolAvailable = createProcessTapSymbolAvailable
+        self.destroyProcessTapSymbolAvailable = destroyProcessTapSymbolAvailable
         self.createAggregateDeviceSymbolAvailable = createAggregateDeviceSymbolAvailable
     }
 
     public var isPotentiallyAvailable: Bool {
-        osVersionSupported && createProcessTapSymbolAvailable && createAggregateDeviceSymbolAvailable
+        osVersionSupported && createProcessTapSymbolAvailable && destroyProcessTapSymbolAvailable && createAggregateDeviceSymbolAvailable
     }
 
     public var summary: String {
@@ -39,8 +42,45 @@ public struct NativeTapAvailability: Equatable, Codable {
         var missing: [String] = []
         if !osVersionSupported { missing.append("macOS 14.4+") }
         if !createProcessTapSymbolAvailable { missing.append("AudioHardwareCreateProcessTap") }
+        if !destroyProcessTapSymbolAvailable { missing.append("AudioHardwareDestroyProcessTap") }
         if !createAggregateDeviceSymbolAvailable { missing.append("AudioHardwareCreateAggregateDevice") }
         return "CoreAudio process-tap unavailable or unsupported in this SDK/runtime (missing: \(missing.joined(separator: ", ")))."
+    }
+}
+
+public struct NativeTapDiagnostic: Equatable, Codable {
+    public let availability: NativeTapAvailability
+    public let createDestroyAttempted: Bool
+    public let createDestroySucceeded: Bool?
+    public let createOSStatus: Int32?
+    public let destroyOSStatus: Int32?
+    public let tapID: UInt32?
+
+    public init(availability: NativeTapAvailability,
+                createDestroyAttempted: Bool,
+                createDestroySucceeded: Bool? = nil,
+                createOSStatus: Int32? = nil,
+                destroyOSStatus: Int32? = nil,
+                tapID: UInt32? = nil) {
+        self.availability = availability
+        self.createDestroyAttempted = createDestroyAttempted
+        self.createDestroySucceeded = createDestroySucceeded
+        self.createOSStatus = createOSStatus
+        self.destroyOSStatus = destroyOSStatus
+        self.tapID = tapID
+    }
+
+    public var summary: String {
+        guard availability.isPotentiallyAvailable else { return availability.summary }
+        guard createDestroyAttempted else {
+            return "CoreAudio process-tap symbols appear available. Create/destroy diagnostic not run; set STT_NATIVE_TAP_DIAGNOSTIC=1 to attempt it."
+        }
+        if createDestroySucceeded == true {
+            return "CoreAudio process-tap create/destroy diagnostic succeeded. Capture wiring is still not implemented yet."
+        }
+        let create = createOSStatus.map(String.init) ?? "not attempted"
+        let destroy = destroyOSStatus.map(String.init) ?? "not attempted"
+        return "CoreAudio process-tap create/destroy diagnostic failed (create OSStatus: \(create), destroy OSStatus: \(destroy))."
     }
 }
 
@@ -120,7 +160,62 @@ public final class SystemAudioRecorder {
         NativeTapAvailability(
             osVersionSupported: isNativeTapOSVersionSupported(),
             createProcessTapSymbolAvailable: coreAudioSymbolAvailable("AudioHardwareCreateProcessTap"),
+            destroyProcessTapSymbolAvailable: coreAudioSymbolAvailable("AudioHardwareDestroyProcessTap"),
             createAggregateDeviceSymbolAvailable: coreAudioSymbolAvailable("AudioHardwareCreateAggregateDevice")
+        )
+    }
+
+    /// Opt-in diagnostic that actually creates and destroys a private global
+    /// process tap. This may trigger macOS permission/TCC behavior depending
+    /// on OS version, bundle attribution, and entitlement state, so callers
+    /// should keep it behind an explicit user/env gate.
+    public static func probeNativeTapDiagnostic(attemptCreateDestroy: Bool = false) -> NativeTapDiagnostic {
+        let availability = probeNativeTapAvailability()
+        guard availability.isPotentiallyAvailable else {
+            return NativeTapDiagnostic(availability: availability, createDestroyAttempted: false)
+        }
+        guard attemptCreateDestroy else {
+            return NativeTapDiagnostic(availability: availability, createDestroyAttempted: false)
+        }
+
+        if #available(macOS 14.2, *) {
+            let description = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
+            description.name = "stt native tap diagnostic"
+            description.isPrivate = true
+            description.isMixdown = true
+            description.isMono = false
+
+            var tapID = AudioObjectID(kAudioObjectUnknown)
+            let createStatus = AudioHardwareCreateProcessTap(description, &tapID)
+            guard createStatus == noErr else {
+                return NativeTapDiagnostic(
+                    availability: availability,
+                    createDestroyAttempted: true,
+                    createDestroySucceeded: false,
+                    createOSStatus: createStatus,
+                    destroyOSStatus: nil,
+                    tapID: tapID == AudioObjectID(kAudioObjectUnknown) ? nil : tapID
+                )
+            }
+
+            let destroyStatus = AudioHardwareDestroyProcessTap(tapID)
+            return NativeTapDiagnostic(
+                availability: availability,
+                createDestroyAttempted: true,
+                createDestroySucceeded: destroyStatus == noErr,
+                createOSStatus: createStatus,
+                destroyOSStatus: destroyStatus,
+                tapID: tapID
+            )
+        }
+
+        return NativeTapDiagnostic(
+            availability: availability,
+            createDestroyAttempted: true,
+            createDestroySucceeded: false,
+            createOSStatus: nil,
+            destroyOSStatus: nil,
+            tapID: nil
         )
     }
 

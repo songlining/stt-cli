@@ -45,7 +45,46 @@ struct SystemAudioRecorderTests {
         #expect(availability.isPotentiallyAvailable == (
             availability.osVersionSupported &&
             availability.createProcessTapSymbolAvailable &&
+            availability.destroyProcessTapSymbolAvailable &&
             availability.createAggregateDeviceSymbolAvailable
         ))
+    }
+
+    @Test func nativeTapDiagnosticSummariesAreActionable() {
+        let unavailable = NativeTapDiagnostic(
+            availability: NativeTapAvailability(
+                osVersionSupported: false,
+                createProcessTapSymbolAvailable: true,
+                destroyProcessTapSymbolAvailable: true,
+                createAggregateDeviceSymbolAvailable: true
+            ),
+            createDestroyAttempted: false
+        )
+        #expect(unavailable.summary.contains("macOS 14.4+"))
+
+        let notAttempted = NativeTapDiagnostic(
+            availability: NativeTapAvailability(
+                osVersionSupported: true,
+                createProcessTapSymbolAvailable: true,
+                destroyProcessTapSymbolAvailable: true,
+                createAggregateDeviceSymbolAvailable: true
+            ),
+            createDestroyAttempted: false
+        )
+        #expect(notAttempted.summary.contains("STT_NATIVE_TAP_DIAGNOSTIC=1"))
+
+        let failed = NativeTapDiagnostic(
+            availability: NativeTapAvailability(
+                osVersionSupported: true,
+                createProcessTapSymbolAvailable: true,
+                destroyProcessTapSymbolAvailable: true,
+                createAggregateDeviceSymbolAvailable: true
+            ),
+            createDestroyAttempted: true,
+            createDestroySucceeded: false,
+            createOSStatus: -50,
+            destroyOSStatus: nil
+        )
+        #expect(failed.summary.contains("create OSStatus: -50"))
     }
 }

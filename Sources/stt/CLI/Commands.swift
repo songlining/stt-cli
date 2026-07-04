@@ -66,9 +66,14 @@ public struct Doctor: ParsableCommand {
         let screenStatus = AudioPermissions.screenRecordingStatus()
         print("Screen Recording permission (only used by ScreenCaptureKit fallback): \(screenStatus.rawValue)")
 
-        let tapAvailability = SystemAudioRecorder.probeNativeTapAvailability()
-        print("System-audio capture: \(tapAvailability.summary)")
+        let tapDiagnostic = SystemAudioRecorder.probeNativeTapDiagnostic(
+            attemptCreateDestroy: ProcessInfo.processInfo.environment["STT_NATIVE_TAP_DIAGNOSTIC"] == "1"
+        )
+        print("System-audio capture: \(tapDiagnostic.summary)")
         print("  falls back to named virtual input device (e.g. BlackHole) — see `stt devices`.")
+        if tapDiagnostic.availability.isPotentiallyAvailable && !tapDiagnostic.createDestroyAttempted {
+            print("  set STT_NATIVE_TAP_DIAGNOSTIC=1 to run an opt-in CoreAudio tap create/destroy diagnostic.")
+        }
 
         print("Transcription backend:")
         var backendReadyFailure: String?

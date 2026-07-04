@@ -333,12 +333,24 @@ func runChecks() throws {
     let unavailableTap = NativeTapAvailability(
         osVersionSupported: true,
         createProcessTapSymbolAvailable: false,
+        destroyProcessTapSymbolAvailable: true,
         createAggregateDeviceSymbolAvailable: true
     )
     try check(!unavailableTap.isPotentiallyAvailable, "native tap availability requires process tap symbol")
     try check(unavailableTap.summary.contains("AudioHardwareCreateProcessTap"), "native tap summary names missing symbol")
     let runtimeTap = SystemAudioRecorder.probeNativeTapAvailability()
     try check(!runtimeTap.summary.isEmpty, "runtime native tap probe has summary")
+
+    let tapDiagnostic = NativeTapDiagnostic(
+        availability: NativeTapAvailability(
+            osVersionSupported: true,
+            createProcessTapSymbolAvailable: true,
+            destroyProcessTapSymbolAvailable: true,
+            createAggregateDeviceSymbolAvailable: true
+        ),
+        createDestroyAttempted: false
+    )
+    try check(tapDiagnostic.summary.contains("STT_NATIVE_TAP_DIAGNOSTIC=1"), "native tap diagnostic summary tells user how to opt in")
 
     let stateTempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: stateTempDir) }
