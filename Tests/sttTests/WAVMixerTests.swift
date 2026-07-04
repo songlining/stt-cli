@@ -49,6 +49,80 @@ struct WAVMixerTests {
         }
     }
 
+    @Test func parseRejectsTooShortData() {
+        #expect(throws: WAVMixerError.self) {
+            try WAVPCMFile.parse(Data("not a wav".utf8))
+        }
+    }
+
+    @Test func parseRejectsMissingRIFFMarker() {
+        var data = WAVPCMFile(sampleRate: 8_000, samples: [1]).encodedData()
+        data.replaceSubrange(0..<4, with: Data("NOPE".utf8))
+
+        #expect(throws: WAVMixerError.self) {
+            try WAVPCMFile.parse(data)
+        }
+    }
+
+    @Test func parseRejectsMissingWAVEMarker() {
+        var data = WAVPCMFile(sampleRate: 8_000, samples: [1]).encodedData()
+        data.replaceSubrange(8..<12, with: Data("NOPE".utf8))
+
+        #expect(throws: WAVMixerError.self) {
+            try WAVPCMFile.parse(data)
+        }
+    }
+
+    @Test func parseRejectsShortFmtChunk() {
+        var data = Data()
+        data.append(Data("RIFF".utf8))
+        appendUInt32LE(36, to: &data)
+        data.append(Data("WAVE".utf8))
+        data.append(Data("fmt ".utf8))
+        appendUInt32LE(8, to: &data)
+        data.append(Data(repeating: 0, count: 24))
+
+        #expect(throws: WAVMixerError.self) {
+            try WAVPCMFile.parse(data)
+        }
+    }
+
+    @Test func parseRejectsMissingFmtOrDataChunk() {
+        var data = Data(repeating: 0, count: 44)
+        data.replaceSubrange(0..<4, with: Data("RIFF".utf8))
+        data.replaceSubrange(8..<12, with: Data("WAVE".utf8))
+
+        #expect(throws: WAVMixerError.self) {
+            try WAVPCMFile.parse(data)
+        }
+    }
+
+    @Test func parseRejectsNonPCMAudioFormat() {
+        var data = WAVPCMFile(sampleRate: 8_000, samples: [1]).encodedData()
+        replaceUInt16LE(3, in: &data, at: 20)
+
+        #expect(throws: WAVMixerError.self) {
+            try WAVPCMFile.parse(data)
+        }
+    }
+
+    @Test func parseRejectsNon16BitDepth() {
+        var data = WAVPCMFile(sampleRate: 8_000, samples: [1]).encodedData()
+        replaceUInt16LE(8, in: &data, at: 34)
+
+        #expect(throws: WAVMixerError.self) {
+            try WAVPCMFile.parse(data)
+        }
+    }
+
+    @Test func parseRejectsMisalignedDataChunk() {
+        let data = WAVWriter.header(sampleRate: 8_000, channels: 2, bitDepth: 16, dataSize: 2) + Data([0, 0])
+
+        #expect(throws: WAVMixerError.self) {
+            try WAVPCMFile.parse(data)
+        }
+    }
+
     @Test func mixFilesWritesCanonicalMonoWAV() throws {
         let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
@@ -73,5 +147,17 @@ struct WAVMixerTests {
         let unsigned = UInt16(bitPattern: value)
         data.append(UInt8(unsigned & 0xff))
         data.append(UInt8((unsigned >> 8) & 0xff))
+    }
+
+    private func appendUInt32LE(_ value: UInt32, to data: inout Data) {
+        data.append(UInt8(value & 0xff))
+        data.append(UInt8((value >> 8) & 0xff))
+        data.append(UInt8((value >> 16) & 0xff))
+        data.append(UInt8((value >> 24) & 0xff))
+    }
+
+    private func replaceUInt16LE(_ value: UInt16, in data: inout Data, at offset: Int) {
+        data[offset] = UInt8(value & 0xff)
+        data[offset + 1] = UInt8((value >> 8) & 0xff)
     }
 }

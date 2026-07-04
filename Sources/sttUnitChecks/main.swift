@@ -127,6 +127,37 @@ func runChecks() throws {
     )
     try checkEqual(mixedWAV.samples, [32_767, -32_768, 123], "WAV mixer clips and pads")
 
+    do {
+        _ = try WAVPCMFile.parse(Data("not a wav".utf8))
+        throw CheckFailure(message: "WAV parser should reject short data")
+    } catch WAVMixerError.invalidHeader(let reason) {
+        try check(reason.contains("shorter than"), "WAV parser short-data error")
+    }
+    do {
+        var invalidRIFF = WAVPCMFile(sampleRate: 8_000, samples: [1]).encodedData()
+        invalidRIFF.replaceSubrange(0..<4, with: Data("NOPE".utf8))
+        _ = try WAVPCMFile.parse(invalidRIFF)
+        throw CheckFailure(message: "WAV parser should reject missing RIFF")
+    } catch WAVMixerError.invalidHeader(let reason) {
+        try check(reason.contains("RIFF"), "WAV parser missing RIFF error")
+    }
+    do {
+        var nonPCM = WAVPCMFile(sampleRate: 8_000, samples: [1]).encodedData()
+        nonPCM[20] = 3
+        nonPCM[21] = 0
+        _ = try WAVPCMFile.parse(nonPCM)
+        throw CheckFailure(message: "WAV parser should reject non-PCM format")
+    } catch WAVMixerError.unsupportedFormat(let reason) {
+        try check(reason.contains("integer PCM"), "WAV parser non-PCM error")
+    }
+    do {
+        let misaligned = WAVWriter.header(sampleRate: 8_000, channels: 2, bitDepth: 16, dataSize: 2) + Data([0, 0])
+        _ = try WAVPCMFile.parse(misaligned)
+        throw CheckFailure(message: "WAV parser should reject misaligned data")
+    } catch WAVMixerError.invalidHeader(let reason) {
+        try check(reason.contains("aligned"), "WAV parser misaligned data error")
+    }
+
     let meetingMixDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: meetingMixDir) }
     try FileManager.default.createDirectory(at: meetingMixDir, withIntermediateDirectories: true)

@@ -348,6 +348,32 @@ PY
 ffprobe -v error -show_entries format=duration,size -of default=nw=1 "${FIXTURE_WAV}"
 assert_audio_file_has_payload "${FIXTURE_WAV}" "synthetic WAV fixture" "The generated fixture should contain PCM audio samples."
 
+print "== Mix command rejects corrupt WAV smoke test =="
+CORRUPT_MIX_DIR="${SMOKE_DIR}/corrupt-mix"
+CORRUPT_WAV="${CORRUPT_MIX_DIR}/not-a-wav.wav"
+mkdir -p "${CORRUPT_MIX_DIR}"
+print "not a wav" >"${CORRUPT_WAV}"
+set +e
+"${APP_BIN}" mix "${CORRUPT_WAV}" "${FIXTURE_WAV}" --output "${CORRUPT_MIX_DIR}/mixed.wav" >"${CORRUPT_MIX_DIR}/stdout.txt" 2>"${CORRUPT_MIX_DIR}/stderr.txt"
+CORRUPT_MIX_EXIT=$?
+set -e
+if [[ ${CORRUPT_MIX_EXIT} -eq 0 ]]; then
+  print -u2 "error: mix accepted corrupt WAV input"
+  head -80 "${CORRUPT_MIX_DIR}/stdout.txt" >&2 || true
+  head -80 "${CORRUPT_MIX_DIR}/stderr.txt" >&2 || true
+  exit 1
+fi
+if ! grep -q "Invalid WAV file:" "${CORRUPT_MIX_DIR}/stdout.txt" "${CORRUPT_MIX_DIR}/stderr.txt"; then
+  print -u2 "error: corrupt-WAV mix output did not include expected parser error"
+  head -80 "${CORRUPT_MIX_DIR}/stdout.txt" >&2 || true
+  head -80 "${CORRUPT_MIX_DIR}/stderr.txt" >&2 || true
+  exit 1
+fi
+if [[ -e "${CORRUPT_MIX_DIR}/mixed.wav" ]]; then
+  print -u2 "error: corrupt-WAV mix wrote output unexpectedly"
+  exit 1
+fi
+
 validate_metadata() {
   local metadata_path="$1"
   python3 -m json.tool "${metadata_path}" >/dev/null
