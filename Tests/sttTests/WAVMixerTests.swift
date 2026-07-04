@@ -170,6 +170,50 @@ struct WAVMixerTests {
         #expect(parsed.samples == [4_000, 2_000])
     }
 
+    @Test func driftWarningReturnsNilWhenDurationsAreClose() throws {
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let lhsURL = tmpDir.appendingPathComponent("lhs.wav")
+        let rhsURL = tmpDir.appendingPathComponent("rhs.wav")
+        try WAVPCMFile(sampleRate: 10, samples: Array(repeating: 1, count: 10)).encodedData().write(to: lhsURL)
+        try WAVPCMFile(sampleRate: 10, samples: Array(repeating: 1, count: 11)).encodedData().write(to: rhsURL)
+
+        #expect(WAVMixer.driftWarning(lhsURL: lhsURL, rhsURL: rhsURL, thresholdSeconds: 0.25) == nil)
+    }
+
+    @Test func driftWarningReportsLargeDurationMismatch() throws {
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let lhsURL = tmpDir.appendingPathComponent("mic.wav")
+        let rhsURL = tmpDir.appendingPathComponent("system.wav")
+        try WAVPCMFile(sampleRate: 10, samples: Array(repeating: 1, count: 10)).encodedData().write(to: lhsURL)
+        try WAVPCMFile(sampleRate: 10, samples: Array(repeating: 1, count: 4)).encodedData().write(to: rhsURL)
+
+        let warning = WAVMixer.driftWarning(lhsURL: lhsURL, rhsURL: rhsURL, thresholdSeconds: 0.25)
+
+        #expect(warning?.contains("duration drift detected: 0.60s") == true)
+        #expect(warning?.contains("mic: 1.00s") == true)
+        #expect(warning?.contains("system: 0.40s") == true)
+        #expect(warning?.contains("--separate-tracks") == true)
+    }
+
+    @Test func driftWarningReturnsNilForUnparseableInput() throws {
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let lhsURL = tmpDir.appendingPathComponent("lhs.wav")
+        let rhsURL = tmpDir.appendingPathComponent("rhs.wav")
+        try Data("not a wav".utf8).write(to: lhsURL)
+        try WAVPCMFile(sampleRate: 10, samples: Array(repeating: 1, count: 10)).encodedData().write(to: rhsURL)
+
+        #expect(WAVMixer.driftWarning(lhsURL: lhsURL, rhsURL: rhsURL) == nil)
+    }
+
     private func appendInt16LE(_ value: Int16, to data: inout Data) {
         let unsigned = UInt16(bitPattern: value)
         data.append(UInt8(unsigned & 0xff))

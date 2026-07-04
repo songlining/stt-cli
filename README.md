@@ -165,7 +165,7 @@ Record meeting tracks and attempt a post-capture `mixed.wav` when both tracks ar
 ./dist/stt.app/Contents/MacOS/stt record --mode meeting --input-device "BlackHole 2ch" --duration 5 --output-dir /tmp/meeting
 ```
 
-Use `--separate-tracks` to keep only `mic.wav` and `system.wav` without attempting mix-down.
+Successful mix-down emits a non-fatal drift note when mic and system track durations differ by more than 0.25s. Use `--separate-tracks` to keep only `mic.wav` and `system.wav` without attempting mix-down when downstream diarization or manual alignment needs the original tracks.
 
 Mix two existing compatible WAV tracks manually:
 
@@ -197,7 +197,7 @@ Fail before recording if the transcription backend is not ready:
   --require-backend-ready
 ```
 
-For meeting pipelines, the CLI records `mic.wav` and `system.wav`, attempts to create `mixed.wav`, and transcribes the mixed track when possible. If mix-down fails, it transcribes `mic.wav` and records the fallback note in `metadata.json`. Pipeline metadata includes `transcribedAudioPath` so downstream tooling can see exactly which audio file was sent to the backend.
+For meeting pipelines, the CLI records `mic.wav` and `system.wav`, attempts to create `mixed.wav`, and transcribes the mixed track when possible. If mix-down fails, it transcribes `mic.wav` and records the fallback note in `metadata.json`. If mix-down succeeds but mic/system durations differ by more than 0.25s, the non-fatal drift note is also written to metadata. Pipeline metadata includes `transcribedAudioPath` so downstream tooling can see exactly which audio file was sent to the backend.
 
 If MLX/mlx-audio is not installed, the pipeline records audio and writes failure details into `metadata.json`.
 

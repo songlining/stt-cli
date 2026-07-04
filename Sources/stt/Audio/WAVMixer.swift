@@ -101,6 +101,12 @@ public struct WAVPCMFile: Equatable {
 }
 
 public enum WAVMixer {
+    /// Heuristic threshold for warning that separately captured mic/system
+    /// tracks may be misaligned after mix-down. Real-world drift depends on
+    /// devices, routing, and startup latency; this warning is intentionally
+    /// non-fatal so the original tracks remain usable for manual inspection.
+    public static let defaultDriftWarningThresholdSeconds: Double = 0.25
+
     public static func mix(_ lhs: WAVPCMFile, _ rhs: WAVPCMFile) throws -> WAVPCMFile {
         guard lhs.sampleRate == rhs.sampleRate else {
             throw WAVMixerError.sampleRateMismatch(lhs.sampleRate, rhs.sampleRate)
@@ -118,6 +124,27 @@ public enum WAVMixer {
             mixed.append(Int16(clamping: a + b))
         }
         return WAVPCMFile(sampleRate: lhs.sampleRate, samples: mixed)
+    }
+
+    public static func driftWarning(lhsURL: URL,
+                                    rhsURL: URL,
+                                    thresholdSeconds: Double = defaultDriftWarningThresholdSeconds) -> String? {
+        guard let lhs = try? WAVPCMFile.parse(Data(contentsOf: lhsURL)),
+              let rhs = try? WAVPCMFile.parse(Data(contentsOf: rhsURL)) else {
+            return nil
+        }
+
+        let lhsDuration = Double(lhs.samples.count) / Double(lhs.sampleRate)
+        let rhsDuration = Double(rhs.samples.count) / Double(rhs.sampleRate)
+        let drift = abs(lhsDuration - rhsDuration)
+        guard drift > thresholdSeconds else { return nil }
+
+        return String(
+            format: "Mic/system track duration drift detected: %.2fs (mic: %.2fs, system: %.2fs). Mixed audio may have timing misalignment; use --separate-tracks for downstream diarization or manual alignment.",
+            drift,
+            lhsDuration,
+            rhsDuration
+        )
     }
 
     @discardableResult

@@ -283,6 +283,7 @@ public struct Record: ParsableCommand {
             if let mixed = mixOutcome.mixedResult {
                 print("Mixed track: \(mixed.outputURL.path) (\(String(format: "%.1f", mixed.durationSeconds))s, \(formatFileSize(mixed.fileSizeBytes)))")
                 if let warning = mixed.emptyAudioWarning { print(warning) }
+                if let driftNote = mixOutcome.driftNote { print("[NOTE] \(driftNote)") }
                 try enforceNonEmptyIfRequested(mixed)
             } else if let note = mixOutcome.note {
                 print("[NOTE] \(note)")
@@ -293,6 +294,7 @@ public struct Record: ParsableCommand {
     public struct MeetingMixOutcome {
         public let mixedResult: RecordingResult?
         public let note: String?
+        public let driftNote: String?
     }
 
     public static func resolveMeetingMixOutcome(micResult: RecordingResult,
@@ -300,11 +302,13 @@ public struct Record: ParsableCommand {
                                                 mixedURL: URL) -> MeetingMixOutcome {
         do {
             let mixed = try WAVMixer.mixFiles(micResult.outputURL, systemResult.outputURL, outputURL: mixedURL)
-            return MeetingMixOutcome(mixedResult: mixed, note: nil)
+            let driftNote = WAVMixer.driftWarning(lhsURL: micResult.outputURL, rhsURL: systemResult.outputURL)
+            return MeetingMixOutcome(mixedResult: mixed, note: nil, driftNote: driftNote)
         } catch {
             return MeetingMixOutcome(
                 mixedResult: nil,
-                note: "Mixed track unavailable (\(error.localizedDescription)); mic.wav and system.wav remain available separately."
+                note: "Mixed track unavailable (\(error.localizedDescription)); mic.wav and system.wav remain available separately.",
+                driftNote: nil
             )
         }
     }
@@ -607,6 +611,7 @@ public struct Pipeline: ParsableCommand {
             record.duration = duration
             record.failIfEmpty = failIfEmpty
             var meetingMixNote: String?
+            var meetingDriftNote: String?
             if mode == .meeting {
                 record.outputDir = runDir.path
                 record.separateTracks = true
@@ -622,10 +627,12 @@ public struct Pipeline: ParsableCommand {
                 state.outputPaths = outputURLs.map(\.path)
                 state.transcribedAudioPath = audioToTranscribeURL.path
                 meetingMixNote = selection.note
+                meetingDriftNote = selection.driftNote
                 if let note = selection.note {
                     print("[NOTE] \(note)")
                 } else {
                     print("Transcribing mixed meeting audio: \(audioToTranscribeURL.path)")
+                    if let driftNote = selection.driftNote { print("[NOTE] \(driftNote)") }
                 }
             }
 
@@ -650,7 +657,8 @@ public struct Pipeline: ParsableCommand {
             }
             // Successful meeting runs may carry a non-fatal mix fallback note;
             // mic/system modes keep nil notes so existing success metadata stays clean.
-            persistState(notes: meetingMixNote, backend: result.backend)
+            let meetingNotes = [meetingMixNote, meetingDriftNote].compactMap { $0 }.joined(separator: "\n")
+            persistState(notes: meetingNotes.isEmpty ? nil : meetingNotes, backend: result.backend)
         } catch {
             persistState(notes: "Pipeline failed: \(error.localizedDescription)")
             throw error
@@ -661,6 +669,7 @@ public struct Pipeline: ParsableCommand {
         public let audioToTranscribeURL: URL
         public let outputURLs: [URL]
         public let note: String?
+        public let driftNote: String?
     }
 
     public static func requireTranscribableAudio(at url: URL) throws {
@@ -670,16 +679,19 @@ public struct Pipeline: ParsableCommand {
     public static func resolveMeetingAudioSource(micURL: URL, systemURL: URL, mixedURL: URL) -> MeetingAudioSelection {
         do {
             _ = try WAVMixer.mixFiles(micURL, systemURL, outputURL: mixedURL)
+            let driftNote = WAVMixer.driftWarning(lhsURL: micURL, rhsURL: systemURL)
             return MeetingAudioSelection(
                 audioToTranscribeURL: mixedURL,
                 outputURLs: [micURL, systemURL, mixedURL],
-                note: nil
+                note: nil,
+                driftNote: driftNote
             )
         } catch {
             return MeetingAudioSelection(
                 audioToTranscribeURL: micURL,
                 outputURLs: [micURL, systemURL],
-                note: "Mixed track unavailable (\(error.localizedDescription)); transcribing mic.wav instead."
+                note: "Mixed track unavailable (\(error.localizedDescription)); transcribing mic.wav instead.",
+                driftNote: nil
             )
         }
     }
