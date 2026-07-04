@@ -147,6 +147,64 @@ if print "${BUNDLED_DOCTOR_OUTPUT}" | grep -q "overall ready: no"; then
   fi
 fi
 
+print "== Invalid python-backend override fails fast =="
+INVALID_BACKEND="${SMOKE_DIR}/definitely-missing-stt-backend-$(date +%Y%m%d%H%M%S)-$$"
+if [[ -e "${INVALID_BACKEND}" ]]; then
+  print -u2 "error: invalid-backend smoke path unexpectedly exists: ${INVALID_BACKEND}"
+  exit 1
+fi
+INVALID_BACKEND_DIR="${SMOKE_DIR}/invalid-backend-override"
+mkdir -p "${INVALID_BACKEND_DIR}"
+
+set +e
+"${APP_BIN}" doctor --python-backend "${INVALID_BACKEND}" >"${INVALID_BACKEND_DIR}/doctor.out" 2>&1
+INVALID_DOCTOR_EXIT=$?
+"${APP_BIN}" transcribe /tmp/definitely-missing-stt-audio.wav --python-backend "${INVALID_BACKEND}" >"${INVALID_BACKEND_DIR}/transcribe.out" 2>&1
+INVALID_TRANSCRIBE_EXIT=$?
+INVALID_PIPE_HOME="${INVALID_BACKEND_DIR}/pipeline-home"
+mkdir -p "${INVALID_PIPE_HOME}"
+STT_HOME="${INVALID_PIPE_HOME}" "${APP_BIN}" pipeline --mode mic --duration 1 --python-backend "${INVALID_BACKEND}" >"${INVALID_BACKEND_DIR}/pipeline.out" 2>&1
+INVALID_PIPE_EXIT=$?
+set -e
+
+if [[ ${INVALID_DOCTOR_EXIT} -eq 0 ]]; then
+  print -u2 "error: doctor accepted invalid --python-backend override"
+  head -80 "${INVALID_BACKEND_DIR}/doctor.out" >&2 || true
+  exit 1
+fi
+if ! grep -q -- "--python-backend must point to an existing directory" "${INVALID_BACKEND_DIR}/doctor.out"; then
+  print -u2 "error: doctor invalid-backend output did not include expected message"
+  head -80 "${INVALID_BACKEND_DIR}/doctor.out" >&2 || true
+  exit 1
+fi
+
+if [[ ${INVALID_TRANSCRIBE_EXIT} -eq 0 ]]; then
+  print -u2 "error: transcribe accepted invalid --python-backend override"
+  head -80 "${INVALID_BACKEND_DIR}/transcribe.out" >&2 || true
+  exit 1
+fi
+if ! grep -q -- "--python-backend must point to an existing directory" "${INVALID_BACKEND_DIR}/transcribe.out"; then
+  print -u2 "error: transcribe invalid-backend output did not include expected message"
+  head -80 "${INVALID_BACKEND_DIR}/transcribe.out" >&2 || true
+  exit 1
+fi
+
+if [[ ${INVALID_PIPE_EXIT} -eq 0 ]]; then
+  print -u2 "error: pipeline accepted invalid --python-backend override"
+  head -80 "${INVALID_BACKEND_DIR}/pipeline.out" >&2 || true
+  exit 1
+fi
+if ! grep -q -- "--python-backend must point to an existing directory" "${INVALID_BACKEND_DIR}/pipeline.out"; then
+  print -u2 "error: pipeline invalid-backend output did not include expected message"
+  head -80 "${INVALID_BACKEND_DIR}/pipeline.out" >&2 || true
+  exit 1
+fi
+INVALID_BACKEND_METADATA="$(find "${INVALID_PIPE_HOME}" -maxdepth 4 -name metadata.json -type f | head -1)"
+if [[ -n "${INVALID_BACKEND_METADATA}" ]]; then
+  print -u2 "error: invalid-backend pipeline wrote metadata despite failing backend preflight: ${INVALID_BACKEND_METADATA}"
+  exit 1
+fi
+
 print "== Finite mic smoke test =="
 mkdir -p "${SMOKE_DIR}"
 "${APP_BIN}" record --mode mic --duration 2 --fail-if-empty --output "${MIC_WAV}"
