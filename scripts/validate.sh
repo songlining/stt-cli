@@ -210,11 +210,15 @@ fi
 print "== Missing audio file preflight smoke test =="
 MISSING_AUDIO_PREFLIGHT_DIR="${SMOKE_DIR}/missing-audio-preflight"
 MISSING_AUDIO_PATH="${MISSING_AUDIO_PREFLIGHT_DIR}/definitely-missing-audio.wav"
+EMPTY_AUDIO_PATH="${MISSING_AUDIO_PREFLIGHT_DIR}/empty-audio.wav"
 MISSING_MIX_PATH="${MISSING_AUDIO_PREFLIGHT_DIR}/definitely-missing-mix.wav"
 mkdir -p "${MISSING_AUDIO_PREFLIGHT_DIR}"
+: >"${EMPTY_AUDIO_PATH}"
 set +e
 "${APP_BIN}" transcribe "${MISSING_AUDIO_PATH}" >"${MISSING_AUDIO_PREFLIGHT_DIR}/transcribe.out" 2>&1
 MISSING_TRANSCRIBE_EXIT=$?
+"${APP_BIN}" transcribe "${EMPTY_AUDIO_PATH}" >"${MISSING_AUDIO_PREFLIGHT_DIR}/transcribe-empty.out" 2>&1
+EMPTY_TRANSCRIBE_EXIT=$?
 "${APP_BIN}" mix "${MISSING_MIX_PATH}" "${MISSING_MIX_PATH}" >"${MISSING_AUDIO_PREFLIGHT_DIR}/mix.out" 2>&1
 MISSING_MIX_EXIT=$?
 set -e
@@ -226,6 +230,16 @@ fi
 if ! grep -q "Audio file not found: ${MISSING_AUDIO_PATH}" "${MISSING_AUDIO_PREFLIGHT_DIR}/transcribe.out"; then
   print -u2 "error: transcribe missing-audio output did not include expected message"
   head -80 "${MISSING_AUDIO_PREFLIGHT_DIR}/transcribe.out" >&2 || true
+  exit 1
+fi
+if [[ ${EMPTY_TRANSCRIBE_EXIT} -eq 0 ]]; then
+  print -u2 "error: transcribe accepted empty audio file"
+  head -80 "${MISSING_AUDIO_PREFLIGHT_DIR}/transcribe-empty.out" >&2 || true
+  exit 1
+fi
+if ! grep -q "Audio file is empty (0 bytes): ${EMPTY_AUDIO_PATH}" "${MISSING_AUDIO_PREFLIGHT_DIR}/transcribe-empty.out"; then
+  print -u2 "error: transcribe empty-audio output did not include expected message"
+  head -80 "${MISSING_AUDIO_PREFLIGHT_DIR}/transcribe-empty.out" >&2 || true
   exit 1
 fi
 if [[ ${MISSING_MIX_EXIT} -eq 0 ]]; then

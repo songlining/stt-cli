@@ -412,7 +412,7 @@ public struct Transcribe: ParsableCommand {
         }
 
         let workingDir = try Self.resolvePythonBackendDirectory(overridePath: pythonBackend)
-        _ = try Paths.requireExistingFile(audioPath)
+        _ = try Paths.requireNonEmptyFile(audioPath)
         if requireBackendReady {
             try Self.requirePythonBackendReady(workingDirectory: workingDir, timeout: timeout)
         }

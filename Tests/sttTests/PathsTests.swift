@@ -78,6 +78,38 @@ struct PathsTests {
         }
     }
 
+    @Test func requireNonEmptyFileReturnsFileURL() throws {
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let filePath = tmpDir.appendingPathComponent("audio.wav")
+        FileManager.default.createFile(atPath: filePath.path, contents: Data("x".utf8))
+
+        let resolved = try Paths.requireNonEmptyFile(filePath.path)
+        #expect(resolved.path == filePath.path)
+    }
+
+    @Test func requireNonEmptyFileThrowsForZeroByteFile() throws {
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let filePath = tmpDir.appendingPathComponent("empty.wav")
+        FileManager.default.createFile(atPath: filePath.path, contents: Data())
+
+        #expect(throws: PathsError.self) {
+            try Paths.requireNonEmptyFile(filePath.path)
+        }
+    }
+
+    @Test func requireNonEmptyFileThrowsForMissingPath() {
+        let path = "/tmp/definitely-missing-stt-audio-\(UUID().uuidString).wav"
+        #expect(throws: PathsError.self) {
+            try Paths.requireNonEmptyFile(path)
+        }
+    }
+
     @Test func timestampTokenFormat() {
         var components = DateComponents()
         components.year = 2026

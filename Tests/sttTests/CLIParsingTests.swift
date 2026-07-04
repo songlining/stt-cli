@@ -120,6 +120,22 @@ struct CLIParsingTests {
         }
     }
 
+    @Test func transcribeRejectsEmptyAudioFileBeforeLaunchingBackend() throws {
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        let empty = tmpDir.appendingPathComponent("empty.wav")
+        FileManager.default.createFile(atPath: empty.path, contents: Data())
+
+        let transcribe = try Transcribe.parse([empty.path])
+        do {
+            try transcribe.run()
+            Issue.record("Expected empty audio file preflight error")
+        } catch {
+            #expect(error.localizedDescription.contains("Audio file is empty (0 bytes): \(empty.path)"))
+        }
+    }
+
     @Test func transcribeStillPrioritizesInvalidBackendOverrideBeforeMissingAudioFile() throws {
         let transcribe = try Transcribe.parse([
             "/tmp/definitely-missing-stt-audio-\(UUID().uuidString).wav",

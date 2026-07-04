@@ -97,6 +97,15 @@ func runChecks() throws {
     } catch PathsError.notAFile(let path) {
         try checkEqual(path, filePreflightDir.path, "directory-as-file preflight preserves path")
     }
+    try checkEqual(try Paths.requireNonEmptyFile(existingAudioFile.path), existingAudioFile, "non-empty file preflight returns URL")
+    let emptyAudioFile = filePreflightDir.appendingPathComponent("empty.wav")
+    FileManager.default.createFile(atPath: emptyAudioFile.path, contents: Data())
+    do {
+        try Paths.requireNonEmptyFile(emptyAudioFile.path)
+        throw CheckFailure(message: "empty file preflight should fail")
+    } catch PathsError.emptyFile(let path) {
+        try checkEqual(path, emptyAudioFile.path, "empty file preflight preserves path")
+    }
 
     let transcribeMissingAudio = try Transcribe.parse([missingAudioFile.path])
     do {
@@ -104,6 +113,13 @@ func runChecks() throws {
         throw CheckFailure(message: "transcribe missing audio should fail before backend launch")
     } catch {
         try check(error.localizedDescription.contains("Audio file not found: \(missingAudioFile.path)"), "transcribe missing audio preflight message")
+    }
+    let transcribeEmptyAudio = try Transcribe.parse([emptyAudioFile.path])
+    do {
+        try transcribeEmptyAudio.run()
+        throw CheckFailure(message: "transcribe empty audio should fail before backend launch")
+    } catch {
+        try check(error.localizedDescription.contains("Audio file is empty (0 bytes): \(emptyAudioFile.path)"), "transcribe empty audio preflight message")
     }
     let mixMissingAudio = try Mix.parse([missingAudioFile.path, missingAudioFile.path])
     do {

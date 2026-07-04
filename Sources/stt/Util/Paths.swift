@@ -71,6 +71,20 @@ public enum Paths {
         return url
     }
 
+    /// Resolves and validates that a user-supplied audio file exists and has
+    /// at least one byte of content. This stays format-agnostic so transcribe
+    /// can still accept non-WAV inputs that the Python backend normalizes.
+    @discardableResult
+    public static func requireNonEmptyFile(_ path: String, fileManager: FileManager = .default) throws -> URL {
+        let url = try requireExistingFile(path, fileManager: fileManager)
+        let attributes = try fileManager.attributesOfItem(atPath: url.path)
+        let size = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
+        guard size > 0 else {
+            throw PathsError.emptyFile(path)
+        }
+        return url
+    }
+
     /// A sortable, filesystem-safe timestamp token e.g. `20260704-143210`.
     public static func timestampToken(date: Date = Date()) -> String {
         let formatter = DateFormatter()
@@ -85,6 +99,7 @@ public enum PathsError: Error, LocalizedError {
     case notADirectory(String)
     case fileNotFound(String)
     case notAFile(String)
+    case emptyFile(String)
 
     public var errorDescription: String? {
         switch self {
@@ -94,6 +109,8 @@ public enum PathsError: Error, LocalizedError {
             return "Audio file not found: \(path)"
         case .notAFile(let path):
             return "Expected a file at \(path), but a directory exists there."
+        case .emptyFile(let path):
+            return "Audio file is empty (0 bytes): \(path)"
         }
     }
 }
