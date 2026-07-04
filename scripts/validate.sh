@@ -435,8 +435,10 @@ from pathlib import Path
 metadata_path = Path(sys.argv[1])
 payload = json.loads(metadata_path.read_text())
 notes = payload.get("notes") or ""
-if "Process timed out" not in notes:
-    raise SystemExit(f"expected timeout notes, got: {notes!r}")
+if "Python transcription backend timed out" not in notes:
+    raise SystemExit(f"expected transcription timeout notes, got: {notes!r}")
+if "--timeout/--transcribe-timeout" not in notes:
+    raise SystemExit(f"expected timeout recovery guidance in notes, got: {notes!r}")
 PY
 print "Timeout fake-backend pipeline metadata: ${TIMEOUT_METADATA_PATH} (${TIMEOUT_ELAPSED}s)"
 

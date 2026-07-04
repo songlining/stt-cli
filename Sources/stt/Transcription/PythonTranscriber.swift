@@ -39,6 +39,7 @@ public struct TranscriptionResult: Codable {
 public enum PythonTranscriberError: Error, LocalizedError {
     case python3NotFound
     case processFailed(exitCode: Int32, stderr: String)
+    case timedOut(seconds: TimeInterval)
     case invalidJSONOutput(String)
 
     public var errorDescription: String? {
@@ -47,9 +48,18 @@ public enum PythonTranscriberError: Error, LocalizedError {
             return "Could not locate python3 on PATH. Install Python 3 or ensure it is on PATH."
         case .processFailed(let exitCode, let stderr):
             return "Python transcription backend exited with code \(exitCode): \(stderr)"
+        case .timedOut(let seconds):
+            return "Python transcription backend timed out after \(formatTimeout(seconds))s. Increase --timeout/--transcribe-timeout, verify the selected model is appropriate for this machine, or check for a hung backend subprocess."
         case .invalidJSONOutput(let output):
             return "Could not parse JSON from transcription backend output: \(output.prefix(500))"
         }
+    }
+
+    private func formatTimeout(_ seconds: TimeInterval) -> String {
+        if seconds.rounded() == seconds {
+            return String(Int(seconds))
+        }
+        return String(format: "%.3g", seconds)
     }
 }
 
@@ -74,12 +84,16 @@ public enum PythonTranscriber {
         if requireReady {
             arguments.append("--fail-if-not-ready")
         }
-        return try ProcessRunner.run(
-            executablePath: python,
-            arguments: arguments,
-            currentDirectory: workingDirectory,
-            timeout: timeout
-        )
+        do {
+            return try ProcessRunner.run(
+                executablePath: python,
+                arguments: arguments,
+                currentDirectory: workingDirectory,
+                timeout: timeout
+            )
+        } catch ProcessRunnerError.timedOut {
+            throw PythonTranscriberError.timedOut(seconds: timeout)
+        }
     }
 
     /// Runs the transcription backend against a given audio file.
@@ -113,12 +127,17 @@ public enum PythonTranscriber {
             maxNewTokens: maxNewTokens
         )
 
-        let result = try ProcessRunner.run(
-            executablePath: python,
-            arguments: arguments,
-            currentDirectory: workingDirectory,
-            timeout: timeout
-        )
+        let result: ProcessResult
+        do {
+            result = try ProcessRunner.run(
+                executablePath: python,
+                arguments: arguments,
+                currentDirectory: workingDirectory,
+                timeout: timeout
+            )
+        } catch ProcessRunnerError.timedOut {
+            throw PythonTranscriberError.timedOut(seconds: timeout ?? 0)
+        }
 
         guard result.succeeded else {
             throw PythonTranscriberError.processFailed(exitCode: result.exitCode, stderr: result.standardError)

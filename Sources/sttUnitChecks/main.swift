@@ -197,6 +197,36 @@ func runChecks() throws {
     )
     try checkEqual(rawTranscript.transcriptText, "plain transcript text", "raw transcript fallback works")
 
+    let timeoutBackendDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: timeoutBackendDir) }
+    let timeoutPackageDir = timeoutBackendDir.appendingPathComponent("stt_vibevoice", isDirectory: true)
+    try FileManager.default.createDirectory(at: timeoutPackageDir, withIntermediateDirectories: true)
+    try Data().write(to: timeoutPackageDir.appendingPathComponent("__init__.py"))
+    try """
+    from __future__ import annotations
+    import time
+    print("sleeping", flush=True)
+    time.sleep(30)
+    """.write(to: timeoutPackageDir.appendingPathComponent("transcribe.py"), atomically: true, encoding: .utf8)
+    let transcriberTimeoutStartedAt = Date()
+    do {
+        _ = try PythonTranscriber.transcribe(
+            audioPath: "audio.wav",
+            outputTextPath: nil,
+            outputJSONPath: nil,
+            device: "cpu",
+            workingDirectory: timeoutBackendDir,
+            timeout: 0.2
+        )
+        throw CheckFailure(message: "PythonTranscriber should wrap backend timeout")
+    } catch PythonTranscriberError.timedOut(let seconds) {
+        try checkEqual(seconds, 0.2, "PythonTranscriber timeout seconds preserved")
+        let message = PythonTranscriberError.timedOut(seconds: seconds).errorDescription ?? ""
+        try check(message.contains("timed out after 0.2s"), "PythonTranscriber timeout message includes duration")
+        try check(message.contains("--timeout/--transcribe-timeout"), "PythonTranscriber timeout message includes CLI guidance")
+    }
+    try check(Date().timeIntervalSince(transcriberTimeoutStartedAt) < 3, "PythonTranscriber timeout returns promptly")
+
     let locatorTempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: locatorTempDir) }
     let bundledResource = locatorTempDir.appendingPathComponent("Resources", isDirectory: true)

@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import sttCore
 
@@ -151,5 +152,45 @@ struct PythonTranscriberTests {
         #expect(result.transcriptTextPath == "backend-output.txt")
         #expect(result.transcriptJSONPath == "structured.json")
         #expect(result.transcriptText == "Saved text")
+    }
+
+    @Test func transcribeTimeoutUsesActionableTranscriptionError() throws {
+        let backendDir = try makeFakeBackend(transcribeSource: """
+        from __future__ import annotations
+        import time
+        print("sleeping", flush=True)
+        time.sleep(30)
+        """)
+        defer { try? FileManager.default.removeItem(at: backendDir) }
+
+        let startedAt = Date()
+        do {
+            _ = try PythonTranscriber.transcribe(
+                audioPath: "audio.wav",
+                outputTextPath: nil,
+                outputJSONPath: nil,
+                device: "cpu",
+                workingDirectory: backendDir,
+                timeout: 0.2
+            )
+            Issue.record("Expected PythonTranscriber timeout")
+        } catch PythonTranscriberError.timedOut(let seconds) {
+            #expect(seconds == 0.2)
+            let message = PythonTranscriberError.timedOut(seconds: seconds).errorDescription ?? ""
+            #expect(message.contains("timed out after 0.2s"))
+            #expect(message.contains("--timeout/--transcribe-timeout"))
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+        #expect(Date().timeIntervalSince(startedAt) < 3)
+    }
+
+    private func makeFakeBackend(transcribeSource: String) throws -> URL {
+        let backendDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let packageDir = backendDir.appendingPathComponent("stt_vibevoice", isDirectory: true)
+        try FileManager.default.createDirectory(at: packageDir, withIntermediateDirectories: true)
+        try Data().write(to: packageDir.appendingPathComponent("__init__.py"))
+        try transcribeSource.write(to: packageDir.appendingPathComponent("transcribe.py"), atomically: true, encoding: .utf8)
+        return backendDir
     }
 }
