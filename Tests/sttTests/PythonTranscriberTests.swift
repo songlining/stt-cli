@@ -62,6 +62,20 @@ struct PythonTranscriberTests {
         #expect(result.raw == stdout)
     }
 
+    @Test func parsesValidJSONObjectAfterLogLineWithMalformedBraces() throws {
+        let stdout = "[backend] retry context {not json}\n{\"backend\":\"fake\",\"text\":\"Recovered\",\"duration\":4.5}"
+        let result = try PythonTranscriber.parseResult(
+            audioPath: "recovered.wav",
+            stdout: stdout,
+            outputTextPath: nil,
+            outputJSONPath: nil
+        )
+
+        #expect(result.backend == "fake")
+        #expect(result.transcriptText == "Recovered")
+        #expect(result.durationSeconds == 4.5)
+    }
+
     @Test func fallsBackToRawTextWhenNoJSONObjectExists() throws {
         let stdout = "plain transcript text only"
         let result = try PythonTranscriber.parseResult(

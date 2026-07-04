@@ -191,15 +191,22 @@ public enum PythonTranscriber {
     }
 
     /// Finds and decodes the first valid top-level JSON object substring in
-    /// a blob of text (defensive against extra log lines around it).
+    /// a blob of text (defensive against extra log lines around it, including
+    /// log lines that themselves contain braces).
     private static func extractJSONObject(from text: String) -> [String: Any]? {
-        guard let firstBrace = text.firstIndex(of: "{"),
-              let lastBrace = text.lastIndex(of: "}"),
-              firstBrace < lastBrace else {
-            return nil
+        let startIndices = text.indices.filter { text[$0] == "{" }
+        let endIndices = text.indices.filter { text[$0] == "}" }
+
+        for start in startIndices {
+            for end in endIndices.reversed() where start < end {
+                let candidate = String(text[start...end])
+                guard let data = candidate.data(using: .utf8),
+                      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    continue
+                }
+                return object
+            }
         }
-        let candidate = String(text[firstBrace...lastBrace])
-        guard let data = candidate.data(using: .utf8) else { return nil }
-        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        return nil
     }
 }
