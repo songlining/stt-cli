@@ -440,6 +440,8 @@ if payload.get("backend") != "fake-validation-backend":
     raise SystemExit(f"unexpected backend in metadata: {payload.get('backend')}")
 if payload.get("notes") is not None:
     raise SystemExit(f"unexpected notes in successful metadata: {payload.get('notes')}")
+if payload.get("transcribedAudioPath") != payload["outputPaths"][0]:
+    raise SystemExit(f"unexpected transcribedAudioPath: {payload.get('transcribedAudioPath')} != {payload['outputPaths'][0]}")
 text_path = Path(payload["transcriptTextPath"])
 json_path = Path(payload["transcriptJSONPath"])
 if not text_path.exists():
@@ -485,6 +487,9 @@ if not notes.startswith("Pipeline failed:"):
     raise SystemExit(f"expected Pipeline failed notes, got: {notes!r}")
 if f"No input device found matching \"{missing_device}\"" not in notes:
     raise SystemExit(f"expected missing-device note, got: {notes!r}")
+transcribed_audio_path = payload.get("transcribedAudioPath")
+if not isinstance(transcribed_audio_path, str) or not transcribed_audio_path.endswith("mic.wav"):
+    raise SystemExit(f"expected intended mic.wav transcribedAudioPath, got: {transcribed_audio_path!r}")
 for key in ("transcriptTextPath", "transcriptJSONPath"):
     path_value = payload.get(key)
     if path_value and Path(path_value).exists():

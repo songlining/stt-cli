@@ -191,7 +191,7 @@ Fail before recording if the transcription backend is not ready:
   --require-backend-ready
 ```
 
-For meeting pipelines, the CLI records `mic.wav` and `system.wav`, attempts to create `mixed.wav`, and transcribes the mixed track when possible. If mix-down fails, it transcribes `mic.wav` and records the fallback note in `metadata.json`.
+For meeting pipelines, the CLI records `mic.wav` and `system.wav`, attempts to create `mixed.wav`, and transcribes the mixed track when possible. If mix-down fails, it transcribes `mic.wav` and records the fallback note in `metadata.json`. Pipeline metadata includes `transcribedAudioPath` so downstream tooling can see exactly which audio file was sent to the backend.
 
 If MLX/mlx-audio is not installed, the pipeline records audio and writes failure details into `metadata.json`.
 

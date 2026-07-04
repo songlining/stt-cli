@@ -18,6 +18,9 @@ public struct SessionState: Codable, Equatable {
     public var durationSeconds: Double?
     public var outputPaths: [String]
     public var separateTracks: Bool
+    /// Audio file path selected for transcription. On early pipeline failures,
+    /// this is the intended path and may not exist yet.
+    public var transcribedAudioPath: String?
     public var transcriptTextPath: String?
     public var transcriptJSONPath: String?
     public var backend: String?
@@ -31,6 +34,7 @@ public struct SessionState: Codable, Equatable {
                 durationSeconds: Double? = nil,
                 outputPaths: [String] = [],
                 separateTracks: Bool = false,
+                transcribedAudioPath: String? = nil,
                 transcriptTextPath: String? = nil,
                 transcriptJSONPath: String? = nil,
                 backend: String? = nil,
@@ -43,6 +47,7 @@ public struct SessionState: Codable, Equatable {
         self.durationSeconds = durationSeconds
         self.outputPaths = outputPaths
         self.separateTracks = separateTracks
+        self.transcribedAudioPath = transcribedAudioPath
         self.transcriptTextPath = transcriptTextPath
         self.transcriptJSONPath = transcriptJSONPath
         self.backend = backend

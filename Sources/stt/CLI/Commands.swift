@@ -571,6 +571,7 @@ public struct Pipeline: ParsableCommand {
             startedAt: startedAt,
             outputPaths: outputURLs.map(\.path),
             separateTracks: mode == .meeting,
+            transcribedAudioPath: audioToTranscribeURL.path,
             transcriptTextPath: transcriptTextURL.path,
             transcriptJSONPath: transcriptJSONURL.path
         )
@@ -613,6 +614,7 @@ public struct Pipeline: ParsableCommand {
                 audioToTranscribeURL = selection.audioToTranscribeURL
                 outputURLs = selection.outputURLs
                 state.outputPaths = outputURLs.map(\.path)
+                state.transcribedAudioPath = audioToTranscribeURL.path
                 meetingMixNote = selection.note
                 if let note = selection.note {
                     print("[NOTE] \(note)")
