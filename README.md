@@ -14,6 +14,7 @@ Implemented:
 - Ad-hoc local signing with microphone entitlement.
 - Python backend diagnostics in `stt doctor`.
 - Pipeline metadata (`metadata.json`) written under each run directory.
+- Best-effort WAV mix-down for compatible meeting-mode `mic.wav` + `system.wav` tracks.
 - Bounded validation script: `scripts/validate.sh`.
 
 Still incomplete:
@@ -129,6 +130,14 @@ Record using a named virtual input device fallback:
 ```bash
 ./dist/stt.app/Contents/MacOS/stt record --mode system --input-device "BlackHole 2ch" --duration 5 --fail-if-empty --output /tmp/system.wav
 ```
+
+Record meeting tracks and attempt a post-capture `mixed.wav` when both tracks are compatible 16-bit PCM WAV:
+
+```bash
+./dist/stt.app/Contents/MacOS/stt record --mode meeting --input-device "BlackHole 2ch" --duration 5 --output-dir /tmp/meeting
+```
+
+Use `--separate-tracks` to keep only `mic.wav` and `system.wav` without attempting mix-down.
 
 Run a bounded pipeline:
 

@@ -78,6 +78,14 @@ func runChecks() throws {
     try checkEqual(header.subdata(in: 8..<12), Data("WAVE".utf8), "WAV WAVE marker")
     try checkEqual(WAVWriter.totalFileSize(dataSize: 1_000), 1_044, "WAV total file size")
 
+    let parsedWAV = try WAVPCMFile.parse(WAVPCMFile(sampleRate: 16_000, samples: [100, -100]).encodedData())
+    try checkEqual(parsedWAV.samples, [100, -100], "WAV PCM parser round trip")
+    let mixedWAV = try WAVMixer.mix(
+        WAVPCMFile(sampleRate: 16_000, samples: [30_000, -30_000, 123]),
+        WAVPCMFile(sampleRate: 16_000, samples: [10_000, -10_000])
+    )
+    try checkEqual(mixedWAV.samples, [32_767, -32_768, 123], "WAV mixer clips and pads")
+
     let headerOnlyRecording = RecordingResult(
         outputURL: URL(fileURLWithPath: "/tmp/header-only.wav"),
         durationSeconds: 1,

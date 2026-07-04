@@ -252,8 +252,7 @@ public struct Record: ParsableCommand {
             print("Recording meeting (mic + fallback system-audio) into \(baseDir.path)")
         }
         if !separateTracks {
-            print("[NOTE] --separate-tracks not passed: recording separate files under the hood")
-            print("(true single-file mixing is not yet implemented). Files: mic.wav, system.wav")
+            print("[NOTE] --separate-tracks not passed: recording mic.wav/system.wav first, then attempting mixed.wav after capture.")
         }
         print(durationStopMessage())
 
@@ -270,6 +269,18 @@ public struct Record: ParsableCommand {
         }
         try enforceNonEmptyIfRequested(result.micResult)
         try enforceNonEmptyIfRequested(result.systemResult)
+
+        if !separateTracks, let mic = result.micResult, let system = result.systemResult {
+            let mixedURL = baseDir.appendingPathComponent("mixed.wav")
+            do {
+                let mixed = try WAVMixer.mixFiles(mic.outputURL, system.outputURL, outputURL: mixedURL)
+                print("Mixed track: \(mixed.outputURL.path) (\(String(format: "%.1f", mixed.durationSeconds))s, \(formatFileSize(mixed.fileSizeBytes)))")
+                if let warning = mixed.emptyAudioWarning { print(warning) }
+                try enforceNonEmptyIfRequested(mixed)
+            } catch {
+                print("[NOTE] Could not create mixed.wav from separate tracks: \(error.localizedDescription)")
+            }
+        }
     }
 
     private func enforceNonEmptyIfRequested(_ result: RecordingResult?) throws {
