@@ -179,34 +179,44 @@ public final class SystemAudioRecorder {
         }
 
         if #available(macOS 14.2, *) {
-            let description = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
-            description.name = "stt native tap diagnostic"
-            description.isPrivate = true
-            description.isMixdown = true
-            description.isMono = false
-
-            var tapID = AudioObjectID(kAudioObjectUnknown)
-            let createStatus = AudioHardwareCreateProcessTap(description, &tapID)
-            guard createStatus == noErr else {
+            let description = NativeTapLifecycle.defaultTapDescription(name: "stt native tap diagnostic")
+            do {
+                let tapResource = try NativeProcessTapResource(description: description)
+                let tapID = tapResource.tapID
+                let destroyStatus = tapResource.invalidate() ?? noErr
+                return NativeTapDiagnostic(
+                    availability: availability,
+                    createDestroyAttempted: true,
+                    createDestroySucceeded: destroyStatus == noErr,
+                    createOSStatus: noErr,
+                    destroyOSStatus: destroyStatus,
+                    tapID: tapID
+                )
+            } catch let error as NativeTapLifecycleError {
+                let createStatus: OSStatus
+                if case .createProcessTapFailed(let status) = error {
+                    createStatus = status
+                } else {
+                    createStatus = -1
+                }
                 return NativeTapDiagnostic(
                     availability: availability,
                     createDestroyAttempted: true,
                     createDestroySucceeded: false,
                     createOSStatus: createStatus,
                     destroyOSStatus: nil,
-                    tapID: tapID == AudioObjectID(kAudioObjectUnknown) ? nil : tapID
+                    tapID: nil
+                )
+            } catch {
+                return NativeTapDiagnostic(
+                    availability: availability,
+                    createDestroyAttempted: true,
+                    createDestroySucceeded: false,
+                    createOSStatus: -1,
+                    destroyOSStatus: nil,
+                    tapID: nil
                 )
             }
-
-            let destroyStatus = AudioHardwareDestroyProcessTap(tapID)
-            return NativeTapDiagnostic(
-                availability: availability,
-                createDestroyAttempted: true,
-                createDestroySucceeded: destroyStatus == noErr,
-                createOSStatus: createStatus,
-                destroyOSStatus: destroyStatus,
-                tapID: tapID
-            )
         }
 
         return NativeTapDiagnostic(
