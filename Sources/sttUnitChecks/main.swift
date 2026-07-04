@@ -144,6 +144,18 @@ func runChecks() throws {
     try check(fallbackGuidance.contains("stt devices"), "system fallback guidance includes devices command")
     try check(fallbackGuidance.contains("--fail-if-empty"), "system fallback guidance includes fail-if-empty")
 
+    let meetingMicError = MeetingRecorderError.micStartFailed(DeviceListError.deviceNotFound("Unit Test Mic")).errorDescription ?? ""
+    try check(meetingMicError.contains("Failed to start mic capture:"), "meeting mic error includes context")
+    try check(meetingMicError.contains("No input device found matching \"Unit Test Mic\""), "meeting mic error preserves underlying message")
+
+    let meetingSystemFallbackError = MeetingRecorderError.systemStartFailed(SystemAudioRecorderError.noFallbackDeviceConfigured).errorDescription ?? ""
+    try check(meetingSystemFallbackError.contains("Failed to start system-audio capture:"), "meeting system error includes context")
+    try check(meetingSystemFallbackError.contains("No fallback input device configured or found for system-audio capture."), "meeting system error preserves fallback guidance")
+    try check(meetingSystemFallbackError.contains("BlackHole"), "meeting system error includes routing guidance")
+
+    let meetingSystemDeviceError = MeetingRecorderError.systemStartFailed(DeviceListError.deviceNotFound("definitely-missing-stt-meeting-device")).errorDescription ?? ""
+    try check(meetingSystemDeviceError.contains("No input device found matching \"definitely-missing-stt-meeting-device\""), "meeting system error preserves missing device")
+
     let unavailableTap = NativeTapAvailability(
         osVersionSupported: true,
         createProcessTapSymbolAvailable: false,

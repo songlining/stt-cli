@@ -218,6 +218,27 @@ run_optional_system_fallback_smoke \
   "Optional system fallback smoke test" \
   "Check that ${STT_SYSTEM_DEVICE:-the selected device} is receiving routed system audio before running this optional check."
 
+print "== Meeting recording missing-device smoke test =="
+MEETING_MISSING_DEVICE="definitely-missing-stt-meeting-device"
+MEETING_MISSING_DIR="${SMOKE_DIR}/meeting-missing-device-$(date +%Y%m%d%H%M%S)"
+mkdir -p "${MEETING_MISSING_DIR}"
+set +e
+"${APP_BIN}" record --mode meeting --input-device "${MEETING_MISSING_DEVICE}" --duration 1 --output-dir "${MEETING_MISSING_DIR}/recording" >"${MEETING_MISSING_DIR}/stdout.txt" 2>"${MEETING_MISSING_DIR}/stderr.txt"
+MEETING_MISSING_EXIT=$?
+set -e
+if [[ ${MEETING_MISSING_EXIT} -eq 0 ]]; then
+  print -u2 "error: meeting recording succeeded despite missing system fallback device"
+  head -80 "${MEETING_MISSING_DIR}/stdout.txt" >&2 || true
+  head -80 "${MEETING_MISSING_DIR}/stderr.txt" >&2 || true
+  exit 1
+fi
+if ! grep -q "No input device found matching \"${MEETING_MISSING_DEVICE}\"" "${MEETING_MISSING_DIR}/stderr.txt" "${MEETING_MISSING_DIR}/stdout.txt"; then
+  print -u2 "error: meeting missing-device output did not include expected device guidance"
+  head -80 "${MEETING_MISSING_DIR}/stdout.txt" >&2 || true
+  head -80 "${MEETING_MISSING_DIR}/stderr.txt" >&2 || true
+  exit 1
+fi
+
 print "== Standalone WAV mix smoke test =="
 MIX_SMOKE_DIR="${SMOKE_DIR}/mix-smoke"
 mkdir -p "${MIX_SMOKE_DIR}"
@@ -393,6 +414,47 @@ if "fake transcript" not in text_path.read_text(encoding="utf-8"):
     raise SystemExit("fake transcript text not written")
 PY
 print "Successful fake-backend pipeline metadata: ${FAKE_METADATA_PATH}"
+
+print "== Failing meeting pipeline missing-device smoke test =="
+MEETING_FAIL_PIPE_HOME="${SMOKE_DIR}/pipeline-meeting-missing-device-home-$(date +%Y%m%d%H%M%S)"
+mkdir -p "${MEETING_FAIL_PIPE_HOME}"
+set +e
+STT_HOME="${MEETING_FAIL_PIPE_HOME}" "${APP_BIN}" pipeline --mode meeting --name meeting-fail --duration 1 --input-device "${MEETING_MISSING_DEVICE}" --transcribe-timeout 5 --device cpu --python-backend "${FAKE_BACKEND}" >"${MEETING_FAIL_PIPE_HOME}/stdout.txt" 2>"${MEETING_FAIL_PIPE_HOME}/stderr.txt"
+MEETING_FAIL_PIPE_EXIT=$?
+set -e
+if [[ ${MEETING_FAIL_PIPE_EXIT} -eq 0 ]]; then
+  print -u2 "error: meeting pipeline succeeded despite missing system fallback device"
+  head -80 "${MEETING_FAIL_PIPE_HOME}/stdout.txt" >&2 || true
+  head -80 "${MEETING_FAIL_PIPE_HOME}/stderr.txt" >&2 || true
+  exit 1
+fi
+MEETING_FAIL_METADATA_PATH="$(find "${MEETING_FAIL_PIPE_HOME}" -maxdepth 4 -name metadata.json -type f | head -1)"
+if [[ -z "${MEETING_FAIL_METADATA_PATH}" ]]; then
+  print -u2 "error: failing meeting pipeline did not write metadata.json"
+  head -80 "${MEETING_FAIL_PIPE_HOME}/stdout.txt" >&2 || true
+  head -80 "${MEETING_FAIL_PIPE_HOME}/stderr.txt" >&2 || true
+  exit 1
+fi
+validate_metadata "${MEETING_FAIL_METADATA_PATH}"
+python3 - "${MEETING_FAIL_METADATA_PATH}" "${MEETING_MISSING_DEVICE}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+metadata_path = Path(sys.argv[1])
+missing_device = sys.argv[2]
+payload = json.loads(metadata_path.read_text())
+notes = payload.get("notes") or ""
+if not notes.startswith("Pipeline failed:"):
+    raise SystemExit(f"expected Pipeline failed notes, got: {notes!r}")
+if f"No input device found matching \"{missing_device}\"" not in notes:
+    raise SystemExit(f"expected missing-device note, got: {notes!r}")
+for key in ("transcriptTextPath", "transcriptJSONPath"):
+    path_value = payload.get(key)
+    if path_value and Path(path_value).exists():
+        raise SystemExit(f"unexpected transcript output exists for meeting recording failure: {path_value}")
+PY
+print "Failing meeting pipeline metadata: ${MEETING_FAIL_METADATA_PATH}"
 
 print "== Failing pipeline smoke test with fake backend =="
 FAILING_BACKEND="${SMOKE_DIR}/fake-backend-failing"
