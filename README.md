@@ -35,7 +35,7 @@ This runs:
 - `swift test`
 - `swift run sttUnitChecks`
 - Python tests via `python/.venv/bin/python -m pytest python/tests`
-- Python backend status CLI JSON/readiness checks
+- Python backend status CLI JSON/readiness checks via `scripts/check-python-backend.sh`
 - App bundle build/sign smoke test
 - Static app-bundle TCC metadata and entitlement checks
 - Bundled `doctor`
@@ -175,6 +175,8 @@ Transcribe an existing audio file with explicit backend settings:
 ```bash
 python3 -m stt_vibevoice.status --json
 python3 -m stt_vibevoice.status --fail-if-not-ready
+./scripts/check-python-backend.sh --json
+./scripts/check-python-backend.sh --strict
 ```
 
 Backend lookup order is:

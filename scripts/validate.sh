@@ -19,11 +19,13 @@ print "== Shell script syntax =="
 zsh -n scripts/bootstrap-python-backend.sh
 zsh -n scripts/build-app-bundle.sh
 zsh -n scripts/check-app-bundle.sh
+zsh -n scripts/check-python-backend.sh
 zsh -n scripts/manual-tcc-smoke.sh
 zsh -n scripts/validate.sh
 zsh -n scripts/lib/bundle-check.sh
 zsh -n scripts/lib/system-fallback-check.sh
 ./scripts/bootstrap-python-backend.sh --help >/dev/null
+./scripts/check-python-backend.sh --help >/dev/null
 
 print "== Swift build/test =="
 swift build
@@ -35,12 +37,12 @@ if [[ -x "python/.venv/bin/python" ]]; then
   python/.venv/bin/python -m pytest python/tests
 
   print "== Python backend status CLI =="
-  PYTHONPATH=python python/.venv/bin/python -m stt_vibevoice.status --json | python3 -m json.tool >/dev/null
+  ./scripts/check-python-backend.sh --backend python --python python/.venv/bin/python --json | python3 -m json.tool >/dev/null
   STATUS_OUT="${SMOKE_DIR}/stt-status-check.out"
   STATUS_ERR="${SMOKE_DIR}/stt-status-check.err"
   mkdir -p "${SMOKE_DIR}"
   set +e
-  PYTHONPATH=python python/.venv/bin/python -m stt_vibevoice.status --fail-if-not-ready >"${STATUS_OUT}" 2>"${STATUS_ERR}"
+  ./scripts/check-python-backend.sh --backend python --python python/.venv/bin/python --strict >"${STATUS_OUT}" 2>"${STATUS_ERR}"
   STATUS_READY_EXIT=$?
   set -e
   if [[ ${STATUS_READY_EXIT} -eq 0 ]]; then
