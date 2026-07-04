@@ -76,6 +76,24 @@ struct PythonTranscriberTests {
         #expect(result.durationSeconds == 4.5)
     }
 
+    @Test func prefersFinalJSONObjectWhenLogsContainEarlierJSON() throws {
+        let stdout = """
+        {"event":"loading","text":"not the transcript"}
+        Wrote transcript: out.txt
+        {"backend":"summary","transcript_text":"Final transcript","duration":7.0}
+        """
+        let result = try PythonTranscriber.parseResult(
+            audioPath: "final.wav",
+            stdout: stdout,
+            outputTextPath: nil,
+            outputJSONPath: nil
+        )
+
+        #expect(result.backend == "summary")
+        #expect(result.transcriptText == "Final transcript")
+        #expect(result.durationSeconds == 7.0)
+    }
+
     @Test func fallsBackToRawTextWhenNoJSONObjectExists() throws {
         let stdout = "plain transcript text only"
         let result = try PythonTranscriber.parseResult(

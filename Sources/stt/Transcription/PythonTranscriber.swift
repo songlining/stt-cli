@@ -197,16 +197,17 @@ public enum PythonTranscriber {
         let startIndices = text.indices.filter { text[$0] == "{" }
         let endIndices = text.indices.filter { text[$0] == "}" }
 
+        var lastObject: [String: Any]?
         for start in startIndices {
-            for end in endIndices.reversed() where start < end {
+            for end in endIndices where start < end {
                 let candidate = String(text[start...end])
                 guard let data = candidate.data(using: .utf8),
                       let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                     continue
                 }
-                return object
+                lastObject = object
             }
         }
-        return nil
+        return lastObject
     }
 }

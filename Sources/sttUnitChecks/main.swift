@@ -166,6 +166,15 @@ func runChecks() throws {
     try checkEqual(noisyTranscript.backend, "fake", "transcriber skips malformed brace logs")
     try checkEqual(noisyTranscript.transcriptText, "Recovered", "transcriber parses JSON after noisy brace log")
 
+    let finalJsonTranscript = try PythonTranscriber.parseResult(
+        audioPath: "final.wav",
+        stdout: "{\"event\":\"loading\",\"text\":\"not transcript\"}\n{\"backend\":\"summary\",\"transcript_text\":\"Final transcript\",\"duration\":7.0}",
+        outputTextPath: nil,
+        outputJSONPath: nil
+    )
+    try checkEqual(finalJsonTranscript.backend, "summary", "transcriber prefers final JSON summary")
+    try checkEqual(finalJsonTranscript.transcriptText, "Final transcript", "transcriber extracts final JSON text")
+
     let rawTranscript = try PythonTranscriber.parseResult(
         audioPath: "raw.wav",
         stdout: "plain transcript text",
