@@ -1,0 +1,583 @@
+import Foundation
+import ArgumentParser
+import AVFoundation
+#if canImport(Darwin)
+import Darwin
+#endif
+
+public struct STT: ParsableCommand {
+    public static let configuration = CommandConfiguration(
+        commandName: "stt",
+        abstract: "Record and transcribe microphone, system, or meeting audio on macOS.",
+        subcommands: [
+            Doctor.self,
+            Devices.self,
+            Record.self,
+            Transcribe.self,
+            Pipeline.self,
+            Permissions.self
+        ]
+    )
+
+    public init() {}
+}
+
+// MARK: - stt doctor
+
+public struct Doctor: ParsableCommand {
+    public static let configuration = CommandConfiguration(abstract: "Check environment, dependencies, and permissions.")
+
+    @Option(name: .long, help: "Path to the Python backend directory containing stt_vibevoice.")
+    public var pythonBackend: String?
+
+    public init() {}
+
+    public func run() throws {
+        print("stt doctor")
+        print("==========")
+
+        let osVersion = ProcessInfo.processInfo.operatingSystemVersion
+        print("macOS version: \(osVersion.majorVersion).\(osVersion.minorVersion).\(osVersion.patchVersion)")
+
+        #if arch(arm64)
+        print("Architecture: arm64 (Apple Silicon)  [OK]")
+        #else
+        print("Architecture: x86_64 (Intel)  [WARNING: MLX/local transcription typically requires Apple Silicon]")
+        #endif
+
+        printToolCheck(name: "ffmpeg")
+        printToolCheck(name: "ffprobe")
+        printToolCheck(name: "python3")
+
+        for line in BundleAttribution.diagnosticLines(
+            bundlePath: Bundle.main.bundlePath,
+            bundleIdentifier: Bundle.main.bundleIdentifier
+        ) {
+            print(line)
+        }
+
+        let micStatus = AudioPermissions.microphoneStatus()
+        print("Microphone permission: \(micStatus.rawValue)")
+
+        let screenStatus = AudioPermissions.screenRecordingStatus()
+        print("Screen Recording permission (only used by ScreenCaptureKit fallback): \(screenStatus.rawValue)")
+
+        let tapAvailability = SystemAudioRecorder.probeNativeTapAvailability()
+        print("System-audio capture: \(tapAvailability.summary)")
+        print("  falls back to named virtual input device (e.g. BlackHole) — see `stt devices`.")
+
+        print("Transcription backend:")
+        do {
+            if let backendDir = try Transcribe.resolvePythonBackendDirectory(overridePath: pythonBackend) {
+                print("  backend path: \(backendDir.path)")
+                let status = try PythonTranscriber.statusReport(workingDirectory: backendDir, timeout: 5)
+                let output = status.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+                if output.isEmpty {
+                    print("  status: no output from python backend status check")
+                } else {
+                    for line in output.split(separator: "\n") {
+                        print("  \(line)")
+                    }
+                }
+                if !status.succeeded {
+                    print("  status check exited with code \(status.exitCode)")
+                    let stderr = status.standardError.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !stderr.isEmpty { print("  stderr: \(stderr)") }
+                }
+            } else {
+                print("  python backend directory not found (set --python-backend or STT_PYTHON_BACKEND)")
+            }
+        } catch {
+            print("  status check failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func printToolCheck(name: String) {
+        if let path = ProcessRunner.resolvePath(name) {
+            print("\(name): found at \(path)  [OK]")
+        } else {
+            print("\(name): NOT FOUND on PATH  [WARNING]")
+        }
+    }
+}
+
+// MARK: - stt devices
+
+public struct Devices: ParsableCommand {
+    public static let configuration = CommandConfiguration(abstract: "List audio input devices.")
+
+    public init() {}
+
+    public func run() throws {
+        let devices = try DeviceList.inputDevices()
+        if devices.isEmpty {
+            print("No input devices found.")
+            return
+        }
+        print("Audio input devices:")
+        for device in devices {
+            let marker = device.isDefaultInput ? " (default input)" : ""
+            print("  [\(device.id)] \(device.name) — \(device.inputChannelCount) ch\(marker)")
+        }
+    }
+}
+
+// MARK: - stt record
+
+public enum RecordModeArgument: String, ExpressibleByArgument, CaseIterable {
+    case mic
+    case system
+    case meeting
+}
+
+public struct Record: ParsableCommand {
+    public static let configuration = CommandConfiguration(abstract: "Record microphone, system, or meeting audio to WAV.")
+
+    @Option(name: .long, help: "Recording mode: mic, system, or meeting.")
+    public var mode: RecordModeArgument = .mic
+
+    @Option(name: .long, help: "Output WAV file path (mic/system mode).")
+    public var output: String?
+
+    @Option(name: .long, help: "Named input device to use (e.g. \"BlackHole 2ch\").")
+    public var inputDevice: String?
+
+    @Option(name: .long, help: "Optional recording duration in seconds; omit to record until Ctrl-C.")
+    public var duration: Double?
+
+    @Flag(name: .long, help: "For meeting mode, write mic and system audio to separate WAV files.")
+    public var separateTracks: Bool = false
+
+    @Option(name: .long, help: "Output directory for meeting mode (used with --separate-tracks).")
+    public var outputDir: String?
+
+    public init() {}
+
+    public func run() throws {
+        if let duration, duration <= 0 {
+            throw ValidationError("--duration must be greater than 0 seconds")
+        }
+
+        switch mode {
+        case .mic:
+            try runMic()
+        case .system:
+            try runSystem()
+        case .meeting:
+            try runMeeting()
+        }
+    }
+
+    private func resolvedOutputURL(defaultName: String) -> URL {
+        if let output {
+            return URL(fileURLWithPath: output)
+        }
+        return Paths.recordingsDirectory().appendingPathComponent(defaultName)
+    }
+
+    private func runMic() throws {
+        let outputURL = resolvedOutputURL(defaultName: "mic-\(Paths.timestampToken()).wav")
+        let recorder = MicRecorder()
+
+        var deviceID: UInt32?
+        if let inputDevice {
+            let device = try DeviceList.resolveInputDevice(named: inputDevice)
+            deviceID = device.id
+            print("Using input device: \(device.name) [\(device.id)]")
+        }
+
+        try recorder.start(outputURL: outputURL, inputDeviceID: deviceID)
+        print("Recording microphone to \(outputURL.path)")
+        print(durationStopMessage())
+
+        let result = waitForStopTriggerAndStop(duration: duration) { try recorder.stop() }
+        report(result: result)
+    }
+
+    private func runSystem() throws {
+        let outputURL = resolvedOutputURL(defaultName: "system-\(Paths.timestampToken()).wav")
+        let recorder = SystemAudioRecorder()
+
+        let method = try recorder.start(outputURL: outputURL, fallbackDeviceName: inputDevice)
+        switch method {
+        case .coreAudioTap:
+            print("Recording system audio via native CoreAudio process tap to \(outputURL.path)")
+        case .namedInputDeviceFallback:
+            print("[NOTE] Native CoreAudio system-audio tap is not available/implemented on this build.")
+            print("Falling back to named virtual input device capture (e.g. BlackHole/Aggregate Device).")
+            print("Recording system audio (fallback) to \(outputURL.path)")
+        }
+        print(durationStopMessage())
+
+        let result = waitForStopTriggerAndStop(duration: duration) { try recorder.stop() }
+        report(result: result)
+    }
+
+    private func runMeeting() throws {
+        let baseDir: URL
+        if let outputDir {
+            baseDir = URL(fileURLWithPath: outputDir)
+        } else {
+            baseDir = Paths.recordingsDirectory().appendingPathComponent("meeting-\(Paths.timestampToken())")
+        }
+        try Paths.ensureDirectoryExists(baseDir)
+
+        let micURL = baseDir.appendingPathComponent("mic.wav")
+        let systemURL = baseDir.appendingPathComponent("system.wav")
+
+        let recorder = MeetingRecorder()
+        let method = try recorder.start(micOutputURL: micURL, systemOutputURL: systemURL, fallbackDeviceName: inputDevice)
+
+        switch method {
+        case .coreAudioTap:
+            print("Recording meeting (mic + native system-audio tap) into \(baseDir.path)")
+        case .namedInputDeviceFallback:
+            print("[NOTE] Native CoreAudio system-audio tap is not available/implemented on this build.")
+            print("System-audio track uses a named virtual input device fallback (e.g. BlackHole).")
+            print("Recording meeting (mic + fallback system-audio) into \(baseDir.path)")
+        }
+        if !separateTracks {
+            print("[NOTE] --separate-tracks not passed: recording separate files under the hood")
+            print("(true single-file mixing is not yet implemented). Files: mic.wav, system.wav")
+        }
+        print(durationStopMessage())
+
+        waitForStopTrigger(duration: duration)
+
+        let result = try recorder.stop(separateTracks: separateTracks)
+        if let mic = result.micResult {
+            print("Mic track: \(mic.outputURL.path) (\(String(format: "%.1f", mic.durationSeconds))s, \(formatFileSize(mic.fileSizeBytes)))")
+            if let warning = mic.emptyAudioWarning { print(warning) }
+        }
+        if let system = result.systemResult {
+            print("System track: \(system.outputURL.path) (\(String(format: "%.1f", system.durationSeconds))s, \(formatFileSize(system.fileSizeBytes)))")
+            if let warning = system.emptyAudioWarning { print(warning) }
+        }
+    }
+
+    private func report(result: RecordingResult) {
+        print("Saved: \(result.outputURL.path)")
+        print("Duration: \(String(format: "%.1f", result.durationSeconds))s")
+        print("File size: \(formatFileSize(result.fileSizeBytes))")
+        if let warning = result.emptyAudioWarning { print(warning) }
+    }
+
+    private func formatFileSize(_ bytes: UInt64?) -> String {
+        guard let bytes else { return "unknown size" }
+        if bytes < 1024 { return "\(bytes) bytes" }
+        return String(format: "%.1f KB", Double(bytes) / 1024.0)
+    }
+
+    private func durationStopMessage() -> String {
+        if let duration {
+            return "Recording for \(String(format: "%.1f", duration))s. Press Ctrl-C to stop early."
+        }
+        return "Press Ctrl-C to stop."
+    }
+
+    /// Blocks until SIGINT/SIGTERM or the optional duration elapses, then runs
+    /// `stop` and returns its result.
+    private func waitForStopTriggerAndStop(duration: Double?, stop: @escaping () throws -> RecordingResult) -> RecordingResult {
+        waitForStopTrigger(duration: duration)
+        do {
+            return try stop()
+        } catch {
+            FileHandle.standardError.write("Error stopping recorder: \(error.localizedDescription)\n".data(using: .utf8)!)
+            Darwin.exit(1)
+        }
+    }
+
+    private func waitForStopTrigger(duration: Double?) {
+        let sema = DispatchSemaphore(value: 0)
+        installSignalHandlers { sema.signal() }
+        if let duration {
+            let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .userInitiated))
+            timer.schedule(deadline: .now() + duration)
+            timer.setEventHandler { sema.signal() }
+            timer.resume()
+            Self.retainedTimers.append(timer)
+        }
+        sema.wait()
+    }
+
+    private func installSignalHandlers(_ handler: @escaping () -> Void) {
+        for signalNumber in [SIGINT, SIGTERM] {
+            signal(signalNumber, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: DispatchQueue.global(qos: .userInitiated))
+            source.setEventHandler(handler: handler)
+            source.resume()
+            Self.retainedSignalSources.append(source)
+        }
+    }
+
+    // Keep dispatch sources alive for the lifetime of the process.
+    nonisolated(unsafe) private static var retainedSignalSources: [DispatchSourceSignal] = []
+    nonisolated(unsafe) private static var retainedTimers: [DispatchSourceTimer] = []
+}
+
+// MARK: - stt transcribe
+
+public struct Transcribe: ParsableCommand {
+    public static let configuration = CommandConfiguration(abstract: "Transcribe an audio file using the Python backend.")
+
+    @Argument(help: "Path to the audio file to transcribe.")
+    public var audioPath: String
+
+    @Option(name: .long, help: "Path to write a plain-text transcript.")
+    public var output: String?
+
+    @Option(name: .long, help: "Path to write structured JSON output.")
+    public var json: String?
+
+    @Option(name: .long, help: "Compute device: auto, gpu, or cpu.")
+    public var device: TranscriberDevice = .auto
+
+    @Option(name: .long, help: "Optional transcription timeout in seconds.")
+    public var timeout: Double?
+
+    @Option(name: .long, help: "Model path or Hugging Face model ID to pass to the Python backend.")
+    public var model: String?
+
+    @Option(name: .long, help: "Maximum new tokens for VibeVoice generation.")
+    public var maxNewTokens: Int?
+
+    @Option(name: .long, help: "Path to the Python backend directory containing stt_vibevoice.")
+    public var pythonBackend: String?
+
+    public init() {}
+
+    public func run() throws {
+        if let timeout, timeout <= 0 {
+            throw ValidationError("--timeout must be greater than 0 seconds")
+        }
+        if let maxNewTokens, maxNewTokens <= 0 {
+            throw ValidationError("--max-new-tokens must be greater than 0")
+        }
+
+        let workingDir = try Self.resolvePythonBackendDirectory(overridePath: pythonBackend)
+        let result = try PythonTranscriber.transcribe(
+            audioPath: audioPath,
+            outputTextPath: output,
+            outputJSONPath: json,
+            device: device.rawValue,
+            workingDirectory: workingDir,
+            timeout: timeout,
+            modelPath: model,
+            maxNewTokens: maxNewTokens
+        )
+
+        if let text = result.transcriptText {
+            print(text)
+        } else {
+            print("Transcription complete. Raw backend output:")
+            print(result.raw)
+        }
+    }
+
+    /// Locates the `python/` directory (containing `stt_vibevoice`). Search
+    /// order: explicit `STT_PYTHON_BACKEND`, current working directory, then
+    /// bundled app resources. This lets the app wrapper run from outside the
+    /// repo while still finding the packaged Python module.
+    public static func findPythonBackendDirectory(fileManager: FileManager = .default,
+                                                  environment: [String: String] = ProcessInfo.processInfo.environment,
+                                                  currentDirectory: URL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath),
+                                                  bundleResourceURL: URL? = Bundle.main.resourceURL) -> URL? {
+        let candidates: [URL] = [
+            environment["STT_PYTHON_BACKEND"].flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0, isDirectory: true) },
+            currentDirectory.appendingPathComponent("python", isDirectory: true),
+            bundleResourceURL?.appendingPathComponent("python", isDirectory: true)
+        ].compactMap { $0 }
+
+        for candidate in candidates {
+            if isDirectory(candidate, fileManager: fileManager) {
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    public static func resolvePythonBackendDirectory(overridePath: String?, fileManager: FileManager = .default) throws -> URL? {
+        guard let overridePath, !overridePath.isEmpty else {
+            return findPythonBackendDirectory(fileManager: fileManager)
+        }
+        let overrideURL = URL(fileURLWithPath: overridePath, isDirectory: true)
+        guard isDirectory(overrideURL, fileManager: fileManager) else {
+            throw ValidationError("--python-backend must point to an existing directory")
+        }
+        return overrideURL
+    }
+
+    private static func isDirectory(_ url: URL, fileManager: FileManager) -> Bool {
+        var isDirectory: ObjCBool = false
+        return fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue
+    }
+}
+
+// MARK: - stt pipeline
+
+public struct Pipeline: ParsableCommand {
+    public static let configuration = CommandConfiguration(abstract: "Record then transcribe in one step.")
+
+    @Option(name: .long, help: "Recording mode: mic, system, or meeting.")
+    public var mode: RecordModeArgument = .mic
+
+    @Option(name: .long, help: "Session name, used to derive output file names.")
+    public var name: String = "session"
+
+    @Option(name: .long, help: "Named input device to use for system fallback capture.")
+    public var inputDevice: String?
+
+    @Option(name: .long, help: "Optional recording duration in seconds; omit to record until Ctrl-C.")
+    public var duration: Double?
+
+    @Option(name: .long, help: "Optional transcription timeout in seconds.")
+    public var transcribeTimeout: Double?
+
+    @Option(name: .long, help: "Compute device for transcription: auto, gpu, or cpu.")
+    public var device: TranscriberDevice = .auto
+
+    @Option(name: .long, help: "Model path or Hugging Face model ID to pass to the Python backend.")
+    public var model: String?
+
+    @Option(name: .long, help: "Maximum new tokens for VibeVoice generation.")
+    public var maxNewTokens: Int?
+
+    @Option(name: .long, help: "Path to the Python backend directory containing stt_vibevoice.")
+    public var pythonBackend: String?
+
+    public init() {}
+
+    public func run() throws {
+        if let duration, duration <= 0 {
+            throw ValidationError("--duration must be greater than 0 seconds")
+        }
+        if let transcribeTimeout, transcribeTimeout <= 0 {
+            throw ValidationError("--transcribe-timeout must be greater than 0 seconds")
+        }
+        if let maxNewTokens, maxNewTokens <= 0 {
+            throw ValidationError("--max-new-tokens must be greater than 0")
+        }
+
+        let runID = Paths.timestampToken()
+        let runDir = Paths.runDirectory(runID: runID)
+        try Paths.ensureDirectoryExists(runDir)
+
+        let startedAt = Date()
+        let recordingMode = RecordingMode(rawValue: mode.rawValue) ?? .mic
+        let transcriptTextURL = runDir.appendingPathComponent("\(name).txt")
+        let transcriptJSONURL = runDir.appendingPathComponent("\(name).json")
+        let outputURLs: [URL]
+        let audioToTranscribeURL: URL
+
+        if mode == .meeting {
+            let micURL = runDir.appendingPathComponent("mic.wav")
+            let systemURL = runDir.appendingPathComponent("system.wav")
+            outputURLs = [micURL, systemURL]
+            audioToTranscribeURL = micURL
+        } else {
+            let outputURL = runDir.appendingPathComponent("\(name).wav")
+            outputURLs = [outputURL]
+            audioToTranscribeURL = outputURL
+        }
+
+        var state = SessionState(
+            runID: runID,
+            name: name,
+            mode: recordingMode,
+            startedAt: startedAt,
+            outputPaths: outputURLs.map(\.path),
+            separateTracks: mode == .meeting,
+            transcriptTextPath: transcriptTextURL.path,
+            transcriptJSONPath: transcriptJSONURL.path
+        )
+
+        func persistState(notes: String? = nil, backend: String? = nil) {
+            state.finishedAt = Date()
+            state.durationSeconds = state.finishedAt?.timeIntervalSince(startedAt)
+            state.notes = notes
+            state.backend = backend
+            _ = try? SessionStateStore.write(state, toRunDirectory: runDir)
+        }
+
+        print("Pipeline mode=\(mode.rawValue) name=\"\(name)\" run=\(runID)")
+        if let duration {
+            print("Note: `stt pipeline` records for \(String(format: "%.1f", duration))s, then transcribes automatically.")
+        } else {
+            print("Note: `stt pipeline` records until you press Ctrl-C, then transcribes automatically.")
+        }
+        if mode == .meeting {
+            print("Note: meeting pipeline records separate mic/system tracks and transcribes mic.wav until true mix-down lands.")
+        }
+
+        do {
+            var record = Record()
+            record.mode = mode
+            record.inputDevice = inputDevice
+            record.duration = duration
+            if mode == .meeting {
+                record.outputDir = runDir.path
+                record.separateTracks = true
+            } else {
+                record.output = audioToTranscribeURL.path
+            }
+            try record.run()
+
+            let result = try PythonTranscriber.transcribe(
+                audioPath: audioToTranscribeURL.path,
+                outputTextPath: transcriptTextURL.path,
+                outputJSONPath: transcriptJSONURL.path,
+                device: device.rawValue,
+                workingDirectory: try Transcribe.resolvePythonBackendDirectory(overridePath: pythonBackend),
+                timeout: transcribeTimeout,
+                modelPath: model,
+                maxNewTokens: maxNewTokens
+            )
+
+            if let text = result.transcriptText {
+                print(text)
+            } else {
+                print("Transcription complete. Raw backend output:")
+                print(result.raw)
+            }
+            persistState(backend: result.backend)
+        } catch {
+            persistState(notes: "Pipeline failed: \(error.localizedDescription)")
+            throw error
+        }
+    }
+}
+
+// MARK: - stt permissions
+
+public struct Permissions: ParsableCommand {
+    public static let configuration = CommandConfiguration(
+        abstract: "Show current permission status and recovery guidance.",
+        subcommands: [ResetHelp.self]
+    )
+
+    public init() {}
+
+    public func run() throws {
+        print("Permission status")
+        print("=================")
+        print("Microphone: \(AudioPermissions.microphoneStatus().rawValue)")
+        print("Screen Recording (ScreenCaptureKit fallback only): \(AudioPermissions.screenRecordingStatus().rawValue)")
+        print("")
+        print("Run `stt permissions reset-help` for tccutil reset commands.")
+    }
+
+    public struct ResetHelp: ParsableCommand {
+        public static let configuration = CommandConfiguration(commandName: "reset-help", abstract: "Print tccutil reset commands and manual recovery steps.")
+
+        public init() {}
+
+        public func run() throws {
+            let bundleID = Bundle.main.bundleIdentifier ?? "com.hashicorp.stt"
+            print(AudioPermissions.microphoneResetGuidance(bundleID: bundleID))
+            print("")
+            print(AudioPermissions.audioCaptureResetGuidance(bundleID: bundleID))
+            print("")
+            print(AudioPermissions.screenRecordingResetGuidance(bundleID: bundleID))
+        }
+    }
+}

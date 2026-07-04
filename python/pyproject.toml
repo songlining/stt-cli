@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stt-vibevoice"
+version = "0.1.0"
+description = "MLX VibeVoice transcription backend for the stt-cli macOS speech-to-text CLI"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = []
+
+[project.optional-dependencies]
+mlx = [
+    "mlx-audio[stt]",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+]
+
+[project.scripts]
+stt-vibevoice-doctor = "stt_vibevoice.status:doctor"
+
+[tool.setuptools]
+packages = ["stt_vibevoice"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

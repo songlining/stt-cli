@@ -1,0 +1,36 @@
+# macOS
+.DS_Store
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Xcode
+DerivedData/
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcuserstate
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+build/
+
+# Coverage
+.coverage
+htmlcov/
+
+# Local env/secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+
+# Generated distributions
+dist/
