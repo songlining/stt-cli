@@ -182,17 +182,23 @@ public final class SystemAudioRecorder {
     public var isRunning: Bool { micRecorder.isRunning }
 
     /// Common virtual-device names to probe when the caller doesn't specify one.
-    private static let commonFallbackDeviceNames = ["BlackHole 2ch", "BlackHole", "Aggregate Device"]
+    public static let commonFallbackDeviceNames = ["BlackHole 2ch", "BlackHole", "Aggregate Device"]
 
-    private static func resolveFallbackDevice(named name: String?) throws -> AudioDeviceInfo {
+    public static func selectFallbackDevice(named name: String?,
+                                            from devices: [AudioDeviceInfo],
+                                            candidateNames: [String] = commonFallbackDeviceNames) throws -> AudioDeviceInfo {
         if let name {
-            return try DeviceList.resolveInputDevice(named: name)
+            return try DeviceList.selectInputDevice(named: name, from: devices)
         }
-        for candidate in commonFallbackDeviceNames {
-            if let device = try? DeviceList.resolveInputDevice(named: candidate) {
+        for candidate in candidateNames {
+            if let device = try? DeviceList.selectInputDevice(named: candidate, from: devices) {
                 return device
             }
         }
         throw SystemAudioRecorderError.noFallbackDeviceConfigured
+    }
+
+    private static func resolveFallbackDevice(named name: String?) throws -> AudioDeviceInfo {
+        try selectFallbackDevice(named: name, from: DeviceList.inputDevices())
     }
 }

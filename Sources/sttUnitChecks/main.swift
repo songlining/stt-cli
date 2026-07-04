@@ -48,6 +48,14 @@ func runChecks() throws {
     } catch DeviceListError.deviceNotFound(let name) {
         try checkEqual(name, "Missing Device", "device not found preserves requested name")
     }
+    try checkEqual(try SystemAudioRecorder.selectFallbackDevice(named: "BlackHole", from: fixtureDevices).id, 1, "explicit fallback device selection")
+    try checkEqual(try SystemAudioRecorder.selectFallbackDevice(named: nil, from: fixtureDevices).id, 2, "default fallback device candidate order")
+    do {
+        _ = try SystemAudioRecorder.selectFallbackDevice(named: nil, from: [fixtureDevices[2]])
+        throw CheckFailure(message: "missing fallback candidates should fail")
+    } catch SystemAudioRecorderError.noFallbackDeviceConfigured {
+        // expected
+    }
 
     let transcribe = try Transcribe.parse([
         "meeting.wav", "--output", "out.txt", "--json", "out.json", "--device", "gpu",
