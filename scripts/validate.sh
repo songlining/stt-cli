@@ -78,6 +78,20 @@ if [[ ! -f "${PACKAGED_BACKEND}" ]]; then
   exit 1
 fi
 
+print "== Custom bundle ID smoke test =="
+CUSTOM_BUNDLE_ID="com.hashicorp.stt.validate"
+CUSTOM_DIST_DIR="${SMOKE_DIR}/dist-custom"
+CUSTOM_APP_BIN="${CUSTOM_DIST_DIR}/stt.app/Contents/MacOS/stt"
+DIST_DIR="${CUSTOM_DIST_DIR}" BUNDLE_ID="${CUSTOM_BUNDLE_ID}" ./scripts/build-app-bundle.sh >/dev/null
+BUNDLE_ID="${CUSTOM_BUNDLE_ID}" ./scripts/check-app-bundle.sh "${CUSTOM_DIST_DIR}/stt.app"
+CUSTOM_DOCTOR_OUTPUT="$(${CUSTOM_APP_BIN} doctor)"
+print "${CUSTOM_DOCTOR_OUTPUT}" | grep -q "Bundle identifier: ${CUSTOM_BUNDLE_ID}"
+CUSTOM_PERMISSIONS_OUTPUT="$(${CUSTOM_APP_BIN} permissions reset-help --bundle-id "${CUSTOM_BUNDLE_ID}")"
+print "${CUSTOM_PERMISSIONS_OUTPUT}" | grep -q "Expected bundle identifier: ${CUSTOM_BUNDLE_ID}"
+print "${CUSTOM_PERMISSIONS_OUTPUT}" | grep -q "tccutil reset Microphone ${CUSTOM_BUNDLE_ID}"
+print "${CUSTOM_PERMISSIONS_OUTPUT}" | grep -q "tccutil reset AudioCapture ${CUSTOM_BUNDLE_ID}"
+print "${CUSTOM_PERMISSIONS_OUTPUT}" | grep -q "tccutil reset ScreenCapture ${CUSTOM_BUNDLE_ID}"
+
 print "== Bundled backend lookup from outside repo =="
 BUNDLED_DOCTOR_OUTPUT="$(cd /tmp && "${APP_BIN}" doctor)"
 print "${BUNDLED_DOCTOR_OUTPUT}" | grep -q "Transcription backend:"

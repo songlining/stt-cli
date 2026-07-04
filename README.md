@@ -37,7 +37,7 @@ This runs:
 - Python tests via `python/.venv/bin/python -m pytest python/tests`
 - Python backend status CLI JSON/readiness checks via `scripts/check-python-backend.sh`
 - App bundle build/sign smoke test
-- Static app-bundle TCC metadata and entitlement checks
+- Static app-bundle TCC metadata and entitlement checks, including custom `BUNDLE_ID` override coverage
 - Bundled `doctor`
 - Codesign verification
 - Finite mic recording smoke test
