@@ -174,6 +174,17 @@ func runChecks() throws {
         try check(reason.contains("integer PCM"), "WAV parser non-PCM error")
     }
     do {
+        var zeroSampleRate = WAVPCMFile(sampleRate: 8_000, samples: [1]).encodedData()
+        zeroSampleRate[24] = 0
+        zeroSampleRate[25] = 0
+        zeroSampleRate[26] = 0
+        zeroSampleRate[27] = 0
+        _ = try WAVPCMFile.parse(zeroSampleRate)
+        throw CheckFailure(message: "WAV parser should reject zero sample rate")
+    } catch WAVMixerError.unsupportedFormat(let reason) {
+        try check(reason.contains("sample rate"), "WAV parser zero sample rate error")
+    }
+    do {
         let misaligned = WAVWriter.header(sampleRate: 8_000, channels: 2, bitDepth: 16, dataSize: 2) + Data([0, 0])
         _ = try WAVPCMFile.parse(misaligned)
         throw CheckFailure(message: "WAV parser should reject misaligned data")

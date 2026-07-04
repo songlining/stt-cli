@@ -71,6 +71,7 @@ public struct WAVPCMFile: Equatable {
         guard audioFormat == 1 else { throw WAVMixerError.unsupportedFormat("only integer PCM format 1 is supported") }
         guard bitDepth == 16 else { throw WAVMixerError.unsupportedFormat("only 16-bit PCM is supported") }
         guard channels >= 1 else { throw WAVMixerError.unsupportedFormat("channel count must be at least 1") }
+        guard sampleRate > 0 else { throw WAVMixerError.unsupportedFormat("sample rate must be greater than 0") }
         let bytesPerFrame = Int(channels) * 2
         guard pcmData.count % bytesPerFrame == 0 else { throw WAVMixerError.invalidHeader("data chunk is not aligned to complete frames") }
 

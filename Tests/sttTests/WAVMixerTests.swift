@@ -115,6 +115,15 @@ struct WAVMixerTests {
         }
     }
 
+    @Test func parseRejectsZeroSampleRate() {
+        var data = WAVPCMFile(sampleRate: 8_000, samples: [1]).encodedData()
+        replaceUInt32LE(0, in: &data, at: 24)
+
+        #expect(throws: WAVMixerError.self) {
+            try WAVPCMFile.parse(data)
+        }
+    }
+
     @Test func parseRejectsMisalignedDataChunk() {
         let data = WAVWriter.header(sampleRate: 8_000, channels: 2, bitDepth: 16, dataSize: 2) + Data([0, 0])
 
@@ -159,5 +168,12 @@ struct WAVMixerTests {
     private func replaceUInt16LE(_ value: UInt16, in data: inout Data, at offset: Int) {
         data[offset] = UInt8(value & 0xff)
         data[offset + 1] = UInt8((value >> 8) & 0xff)
+    }
+
+    private func replaceUInt32LE(_ value: UInt32, in data: inout Data, at offset: Int) {
+        data[offset] = UInt8(value & 0xff)
+        data[offset + 1] = UInt8((value >> 8) & 0xff)
+        data[offset + 2] = UInt8((value >> 16) & 0xff)
+        data[offset + 3] = UInt8((value >> 24) & 0xff)
     }
 }
