@@ -72,8 +72,9 @@ public struct Doctor: ParsableCommand {
 
         print("Transcription backend:")
         var backendReadyFailure: String?
+        let backendDir = try Transcribe.resolvePythonBackendDirectory(overridePath: pythonBackend)
         do {
-            if let backendDir = try Transcribe.resolvePythonBackendDirectory(overridePath: pythonBackend) {
+            if let backendDir {
                 print("  backend path: \(backendDir.path)")
                 let status = try PythonTranscriber.statusReport(workingDirectory: backendDir, timeout: 5, requireReady: requireBackendReady)
                 let output = status.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)

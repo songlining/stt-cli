@@ -11,6 +11,13 @@ struct CLIParsingTests {
         #expect(doctor.requireBackendReady)
     }
 
+    @Test func doctorRejectsMissingPythonBackendOverrideBeforeStatusCheck() throws {
+        let doctor = try Doctor.parse(["--python-backend", "/definitely/missing/stt-backend"])
+        #expect(throws: (any Error).self) {
+            try doctor.run()
+        }
+    }
+
     @Test func recordMicModeParsesOutputAndMode() throws {
         let record = try Record.parse(["--mode", "mic", "--output", "foo.wav"])
         #expect(record.mode == .mic)
