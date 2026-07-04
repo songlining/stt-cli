@@ -353,10 +353,29 @@ def main(argv: Optional[List[str]] = None) -> int:
     _write_text_transcript(output_path, audio_path, result)
     print(f"Wrote transcript: {output_path}")
 
-    if args.json_output:
-        json_path = Path(args.json_output)
+    json_path = Path(args.json_output) if args.json_output else None
+    if json_path:
         _write_json_transcript(json_path, audio_path, result)
         print(f"Wrote JSON transcript: {json_path}")
+
+    # Print a compact machine-readable summary after human-readable log lines
+    # so the Swift CLI can parse transcript text/backend/duration from stdout
+    # even when files were also written.
+    summary = {
+        "audio_file": str(audio_path),
+        "backend": result.get("backend"),
+        "device": result.get("device"),
+        "model_path": result.get("model_path"),
+        "duration": result.get("duration_seconds"),
+        "duration_seconds": result.get("duration_seconds"),
+        "text": result.get("text"),
+        "transcript_text": result.get("text"),
+        "diarised_text": result.get("diarised_text"),
+        "transcript_file": str(output_path),
+        "json_file": str(json_path) if json_path else None,
+        "chunked": result.get("chunked"),
+    }
+    print(json.dumps(summary, sort_keys=True))
 
     return 0
 
