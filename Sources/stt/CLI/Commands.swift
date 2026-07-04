@@ -412,6 +412,7 @@ public struct Transcribe: ParsableCommand {
         }
 
         let workingDir = try Self.resolvePythonBackendDirectory(overridePath: pythonBackend)
+        _ = try Paths.requireExistingFile(audioPath)
         if requireBackendReady {
             try Self.requirePythonBackendReady(workingDirectory: workingDir, timeout: timeout)
         }
@@ -693,8 +694,8 @@ public struct Mix: ParsableCommand {
     public init() {}
 
     public func run() throws {
-        let firstURL = URL(fileURLWithPath: firstAudioPath)
-        let secondURL = URL(fileURLWithPath: secondAudioPath)
+        let firstURL = try Paths.requireExistingFile(firstAudioPath)
+        let secondURL = try Paths.requireExistingFile(secondAudioPath)
         let outputURL = output.map { URL(fileURLWithPath: $0) }
             ?? firstURL.deletingLastPathComponent().appendingPathComponent("mixed.wav")
 

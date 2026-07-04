@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 import ArgumentParser
 @testable import sttCore
@@ -108,6 +109,30 @@ struct CLIParsingTests {
         }
     }
 
+    @Test func transcribeRejectsMissingAudioFileBeforeLaunchingBackend() throws {
+        let missing = "/tmp/definitely-missing-stt-audio-\(UUID().uuidString).wav"
+        let transcribe = try Transcribe.parse([missing])
+        do {
+            try transcribe.run()
+            Issue.record("Expected missing audio file preflight error")
+        } catch {
+            #expect(error.localizedDescription.contains("Audio file not found: \(missing)"))
+        }
+    }
+
+    @Test func transcribeStillPrioritizesInvalidBackendOverrideBeforeMissingAudioFile() throws {
+        let transcribe = try Transcribe.parse([
+            "/tmp/definitely-missing-stt-audio-\(UUID().uuidString).wav",
+            "--python-backend", "/definitely/missing/stt-backend"
+        ])
+        do {
+            try transcribe.run()
+            Issue.record("Expected invalid backend preflight error")
+        } catch {
+            #expect(error.localizedDescription.contains("--python-backend must point to an existing directory"))
+        }
+    }
+
     @Test func transcribeDefaultsDeviceToAuto() throws {
         let transcribe = try Transcribe.parse(["meeting.wav"])
         #expect(transcribe.device == .auto)
@@ -146,6 +171,17 @@ struct CLIParsingTests {
         #expect(mix.secondAudioPath == "system.wav")
         #expect(mix.output == "mixed.wav")
         #expect(mix.failIfEmpty)
+    }
+
+    @Test func mixRejectsMissingInputFileBeforeMixing() throws {
+        let missing = "/tmp/definitely-missing-stt-mix-input-\(UUID().uuidString).wav"
+        let mix = try Mix.parse([missing, missing])
+        do {
+            try mix.run()
+            Issue.record("Expected missing mix input preflight error")
+        } catch {
+            #expect(error.localizedDescription.contains("Audio file not found: \(missing)"))
+        }
     }
 
     @Test func pipelineRejectsInvalidDurationsBeforeStartingCapture() throws {

@@ -207,6 +207,38 @@ if [[ -n "${INVALID_BACKEND_METADATA}" ]]; then
   exit 1
 fi
 
+print "== Missing audio file preflight smoke test =="
+MISSING_AUDIO_PREFLIGHT_DIR="${SMOKE_DIR}/missing-audio-preflight"
+MISSING_AUDIO_PATH="${MISSING_AUDIO_PREFLIGHT_DIR}/definitely-missing-audio.wav"
+MISSING_MIX_PATH="${MISSING_AUDIO_PREFLIGHT_DIR}/definitely-missing-mix.wav"
+mkdir -p "${MISSING_AUDIO_PREFLIGHT_DIR}"
+set +e
+"${APP_BIN}" transcribe "${MISSING_AUDIO_PATH}" >"${MISSING_AUDIO_PREFLIGHT_DIR}/transcribe.out" 2>&1
+MISSING_TRANSCRIBE_EXIT=$?
+"${APP_BIN}" mix "${MISSING_MIX_PATH}" "${MISSING_MIX_PATH}" >"${MISSING_AUDIO_PREFLIGHT_DIR}/mix.out" 2>&1
+MISSING_MIX_EXIT=$?
+set -e
+if [[ ${MISSING_TRANSCRIBE_EXIT} -eq 0 ]]; then
+  print -u2 "error: transcribe accepted missing audio file"
+  head -80 "${MISSING_AUDIO_PREFLIGHT_DIR}/transcribe.out" >&2 || true
+  exit 1
+fi
+if ! grep -q "Audio file not found: ${MISSING_AUDIO_PATH}" "${MISSING_AUDIO_PREFLIGHT_DIR}/transcribe.out"; then
+  print -u2 "error: transcribe missing-audio output did not include expected message"
+  head -80 "${MISSING_AUDIO_PREFLIGHT_DIR}/transcribe.out" >&2 || true
+  exit 1
+fi
+if [[ ${MISSING_MIX_EXIT} -eq 0 ]]; then
+  print -u2 "error: mix accepted missing input file"
+  head -80 "${MISSING_AUDIO_PREFLIGHT_DIR}/mix.out" >&2 || true
+  exit 1
+fi
+if ! grep -q "Audio file not found: ${MISSING_MIX_PATH}" "${MISSING_AUDIO_PREFLIGHT_DIR}/mix.out"; then
+  print -u2 "error: mix missing-input output did not include expected message"
+  head -80 "${MISSING_AUDIO_PREFLIGHT_DIR}/mix.out" >&2 || true
+  exit 1
+fi
+
 MEETING_MISSING_DEVICE="definitely-missing-stt-meeting-device"
 if [[ "${SKIP_MIC_HARDWARE}" == "1" ]]; then
   print "== Finite mic smoke test skipped (STT_SKIP_MIC_HARDWARE=1) =="

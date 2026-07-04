@@ -49,6 +49,35 @@ struct PathsTests {
         }
     }
 
+    @Test func requireExistingFileReturnsFileURL() throws {
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let filePath = tmpDir.appendingPathComponent("audio.wav")
+        FileManager.default.createFile(atPath: filePath.path, contents: Data("x".utf8))
+
+        let resolved = try Paths.requireExistingFile(filePath.path)
+        #expect(resolved.path == filePath.path)
+    }
+
+    @Test func requireExistingFileThrowsForMissingPath() {
+        let path = "/tmp/definitely-missing-stt-audio-\(UUID().uuidString).wav"
+        #expect(throws: PathsError.self) {
+            try Paths.requireExistingFile(path)
+        }
+    }
+
+    @Test func requireExistingFileThrowsForDirectory() throws {
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        #expect(throws: PathsError.self) {
+            try Paths.requireExistingFile(tmpDir.path)
+        }
+    }
+
     @Test func timestampTokenFormat() {
         var components = DateComponents()
         components.year = 2026

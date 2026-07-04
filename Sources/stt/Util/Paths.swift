@@ -57,6 +57,20 @@ public enum Paths {
         return url
     }
 
+    /// Resolves and validates that a user-supplied path exists and is a file.
+    @discardableResult
+    public static func requireExistingFile(_ path: String, fileManager: FileManager = .default) throws -> URL {
+        let url = URL(fileURLWithPath: path)
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
+            throw PathsError.fileNotFound(path)
+        }
+        guard !isDirectory.boolValue else {
+            throw PathsError.notAFile(path)
+        }
+        return url
+    }
+
     /// A sortable, filesystem-safe timestamp token e.g. `20260704-143210`.
     public static func timestampToken(date: Date = Date()) -> String {
         let formatter = DateFormatter()
@@ -69,11 +83,17 @@ public enum Paths {
 
 public enum PathsError: Error, LocalizedError {
     case notADirectory(String)
+    case fileNotFound(String)
+    case notAFile(String)
 
     public var errorDescription: String? {
         switch self {
         case .notADirectory(let path):
             return "Expected a directory at \(path), but a file exists there."
+        case .fileNotFound(let path):
+            return "Audio file not found: \(path)"
+        case .notAFile(let path):
+            return "Expected a file at \(path), but a directory exists there."
         }
     }
 }

@@ -78,6 +78,41 @@ func runChecks() throws {
     try checkEqual(Paths.appSupportDirectory(environment: env).path, "/tmp/stt-test-home", "STT_HOME override works")
     try checkEqual(Paths.recordingsDirectory(environment: env).path, "/tmp/stt-test-home/recordings", "recordings dir nested")
 
+    let filePreflightDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: filePreflightDir) }
+    try FileManager.default.createDirectory(at: filePreflightDir, withIntermediateDirectories: true)
+    let existingAudioFile = filePreflightDir.appendingPathComponent("audio.wav")
+    FileManager.default.createFile(atPath: existingAudioFile.path, contents: Data("x".utf8))
+    try checkEqual(try Paths.requireExistingFile(existingAudioFile.path), existingAudioFile, "existing file preflight returns URL")
+    let missingAudioFile = filePreflightDir.appendingPathComponent("missing.wav")
+    do {
+        try Paths.requireExistingFile(missingAudioFile.path)
+        throw CheckFailure(message: "missing file preflight should fail")
+    } catch PathsError.fileNotFound(let path) {
+        try checkEqual(path, missingAudioFile.path, "missing file preflight preserves path")
+    }
+    do {
+        try Paths.requireExistingFile(filePreflightDir.path)
+        throw CheckFailure(message: "directory-as-file preflight should fail")
+    } catch PathsError.notAFile(let path) {
+        try checkEqual(path, filePreflightDir.path, "directory-as-file preflight preserves path")
+    }
+
+    let transcribeMissingAudio = try Transcribe.parse([missingAudioFile.path])
+    do {
+        try transcribeMissingAudio.run()
+        throw CheckFailure(message: "transcribe missing audio should fail before backend launch")
+    } catch {
+        try check(error.localizedDescription.contains("Audio file not found: \(missingAudioFile.path)"), "transcribe missing audio preflight message")
+    }
+    let mixMissingAudio = try Mix.parse([missingAudioFile.path, missingAudioFile.path])
+    do {
+        try mixMissingAudio.run()
+        throw CheckFailure(message: "mix missing input should fail before mixing")
+    } catch {
+        try check(error.localizedDescription.contains("Audio file not found: \(missingAudioFile.path)"), "mix missing input preflight message")
+    }
+
     let header = WAVWriter.header(sampleRate: 16_000, channels: 1, bitDepth: 16, dataSize: 32_000)
     try checkEqual(header.count, 44, "WAV header size")
     try checkEqual(header.subdata(in: 0..<4), Data("RIFF".utf8), "WAV RIFF marker")
