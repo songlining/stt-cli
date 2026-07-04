@@ -120,6 +120,40 @@ func runChecks() throws {
     try check(fallbackSelection.note?.contains("Mixed track unavailable") == true, "meeting pipeline fallback note explains mix failure")
     try check(fallbackSelection.note?.contains("transcribing mic.wav instead") == true, "meeting pipeline fallback note explains mic transcription")
 
+    let recordMixDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: recordMixDir) }
+    try FileManager.default.createDirectory(at: recordMixDir, withIntermediateDirectories: true)
+    let recordMicURL = recordMixDir.appendingPathComponent("mic.wav")
+    let recordSystemURL = recordMixDir.appendingPathComponent("system.wav")
+    let recordMixedURL = recordMixDir.appendingPathComponent("mixed.wav")
+    try WAVPCMFile(sampleRate: 8_000, samples: [1_000, 2_000]).encodedData().write(to: recordMicURL)
+    try WAVPCMFile(sampleRate: 8_000, samples: [3_000]).encodedData().write(to: recordSystemURL)
+    let recordMixOutcome = Record.resolveMeetingMixOutcome(
+        micResult: RecordingResult(outputURL: recordMicURL, durationSeconds: 0.25, fileSizeBytes: 48),
+        systemResult: RecordingResult(outputURL: recordSystemURL, durationSeconds: 0.25, fileSizeBytes: 46),
+        mixedURL: recordMixedURL
+    )
+    try check(recordMixOutcome.note == nil, "meeting record mix has no fallback note on success")
+    try checkEqual(recordMixOutcome.mixedResult?.outputURL, recordMixedURL, "meeting record mix selects mixed track")
+    try check(FileManager.default.fileExists(atPath: recordMixedURL.path), "meeting record mix writes mixed file")
+
+    let recordFallbackDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: recordFallbackDir) }
+    try FileManager.default.createDirectory(at: recordFallbackDir, withIntermediateDirectories: true)
+    let recordFallbackMicURL = recordFallbackDir.appendingPathComponent("mic.wav")
+    let recordFallbackSystemURL = recordFallbackDir.appendingPathComponent("system.wav")
+    let recordFallbackMixedURL = recordFallbackDir.appendingPathComponent("mixed.wav")
+    try WAVPCMFile(sampleRate: 16_000, samples: [1]).encodedData().write(to: recordFallbackMicURL)
+    try WAVPCMFile(sampleRate: 44_100, samples: [1]).encodedData().write(to: recordFallbackSystemURL)
+    let recordFallbackOutcome = Record.resolveMeetingMixOutcome(
+        micResult: RecordingResult(outputURL: recordFallbackMicURL, durationSeconds: 0.1, fileSizeBytes: 46),
+        systemResult: RecordingResult(outputURL: recordFallbackSystemURL, durationSeconds: 0.1, fileSizeBytes: 46),
+        mixedURL: recordFallbackMixedURL
+    )
+    try check(recordFallbackOutcome.mixedResult == nil, "meeting record mix fallback has no mixed result")
+    try check(recordFallbackOutcome.note?.contains("Mixed track unavailable") == true, "meeting record mix fallback note explains failure")
+    try check(recordFallbackOutcome.note?.contains("mic.wav and system.wav remain available separately") == true, "meeting record mix fallback note preserves tracks")
+
     let headerOnlyRecording = RecordingResult(
         outputURL: URL(fileURLWithPath: "/tmp/header-only.wav"),
         durationSeconds: 1,

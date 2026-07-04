@@ -274,14 +274,33 @@ public struct Record: ParsableCommand {
 
         if !separateTracks, let mic = result.micResult, let system = result.systemResult {
             let mixedURL = baseDir.appendingPathComponent("mixed.wav")
-            do {
-                let mixed = try WAVMixer.mixFiles(mic.outputURL, system.outputURL, outputURL: mixedURL)
+            let mixOutcome = Self.resolveMeetingMixOutcome(micResult: mic, systemResult: system, mixedURL: mixedURL)
+            if let mixed = mixOutcome.mixedResult {
                 print("Mixed track: \(mixed.outputURL.path) (\(String(format: "%.1f", mixed.durationSeconds))s, \(formatFileSize(mixed.fileSizeBytes)))")
                 if let warning = mixed.emptyAudioWarning { print(warning) }
                 try enforceNonEmptyIfRequested(mixed)
-            } catch {
-                print("[NOTE] Could not create mixed.wav from separate tracks: \(error.localizedDescription)")
+            } else if let note = mixOutcome.note {
+                print("[NOTE] \(note)")
             }
+        }
+    }
+
+    public struct MeetingMixOutcome {
+        public let mixedResult: RecordingResult?
+        public let note: String?
+    }
+
+    public static func resolveMeetingMixOutcome(micResult: RecordingResult,
+                                                systemResult: RecordingResult,
+                                                mixedURL: URL) -> MeetingMixOutcome {
+        do {
+            let mixed = try WAVMixer.mixFiles(micResult.outputURL, systemResult.outputURL, outputURL: mixedURL)
+            return MeetingMixOutcome(mixedResult: mixed, note: nil)
+        } catch {
+            return MeetingMixOutcome(
+                mixedResult: nil,
+                note: "Mixed track unavailable (\(error.localizedDescription)); mic.wav and system.wav remain available separately."
+            )
         }
     }
 
