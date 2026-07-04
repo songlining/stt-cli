@@ -43,4 +43,30 @@ struct ProcessRunnerTests {
         let actual = result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
         #expect(actual == expected)
     }
+
+    @Test func runTimesOutSlowProcessWithoutHanging() throws {
+        let startedAt = Date()
+        do {
+            _ = try ProcessRunner.run(executablePath: "/bin/sh", arguments: ["-c", "sleep 30"], timeout: 0.2)
+            Issue.record("Expected timeout error")
+        } catch ProcessRunnerError.timedOut(let command) {
+            #expect(command == "/bin/sh")
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+        #expect(Date().timeIntervalSince(startedAt) < 3)
+    }
+
+    @Test func runEscalatesWhenProcessIgnoresSIGTERM() throws {
+        let startedAt = Date()
+        do {
+            _ = try ProcessRunner.run(executablePath: "/bin/sh", arguments: ["-c", "trap '' TERM; while true; do sleep 1; done"], timeout: 0.2)
+            Issue.record("Expected timeout error")
+        } catch ProcessRunnerError.timedOut(let command) {
+            #expect(command == "/bin/sh")
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+        #expect(Date().timeIntervalSince(startedAt) < 4)
+    }
 }

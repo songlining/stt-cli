@@ -219,6 +219,24 @@ func runChecks() throws {
     let echo = try ProcessRunner.run(executablePath: "/bin/echo", arguments: ["hello", "world"])
     try check(echo.succeeded, "echo succeeds")
     try checkEqual(echo.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines), "hello world", "echo stdout captured")
+
+    let slowStartedAt = Date()
+    do {
+        _ = try ProcessRunner.run(executablePath: "/bin/sh", arguments: ["-c", "sleep 30"], timeout: 0.2)
+        throw CheckFailure(message: "slow process should time out")
+    } catch ProcessRunnerError.timedOut(let command) {
+        try checkEqual(command, "/bin/sh", "slow process timeout command")
+    }
+    try check(Date().timeIntervalSince(slowStartedAt) < 3, "slow process timeout returns promptly")
+
+    let ignoringStartedAt = Date()
+    do {
+        _ = try ProcessRunner.run(executablePath: "/bin/sh", arguments: ["-c", "trap '' TERM; while true; do sleep 1; done"], timeout: 0.2)
+        throw CheckFailure(message: "SIGTERM-ignoring process should time out")
+    } catch ProcessRunnerError.timedOut(let command) {
+        try checkEqual(command, "/bin/sh", "SIGTERM-ignoring timeout command")
+    }
+    try check(Date().timeIntervalSince(ignoringStartedAt) < 4, "SIGTERM-ignoring process timeout returns promptly")
 }
 
 do {

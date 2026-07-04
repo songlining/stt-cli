@@ -385,4 +385,59 @@ for key in ("transcriptTextPath", "transcriptJSONPath"):
 PY
 print "Failing fake-backend pipeline metadata: ${FAILING_METADATA_PATH}"
 
+print "== Timeout pipeline smoke test with fake backend =="
+TIMEOUT_BACKEND="${SMOKE_DIR}/fake-backend-timeout"
+mkdir -p "${TIMEOUT_BACKEND}/stt_vibevoice"
+touch "${TIMEOUT_BACKEND}/stt_vibevoice/__init__.py"
+cat >"${TIMEOUT_BACKEND}/stt_vibevoice/transcribe.py" <<'PY'
+from __future__ import annotations
+
+import signal
+import time
+
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+print("fake backend sleeping past timeout", flush=True)
+time.sleep(30)
+PY
+TIMEOUT_PIPE_HOME="${SMOKE_DIR}/pipeline-timeout-home-$(date +%Y%m%d%H%M%S)"
+mkdir -p "${TIMEOUT_PIPE_HOME}"
+TIMEOUT_STARTED_AT="$(date +%s)"
+set +e
+STT_HOME="${TIMEOUT_PIPE_HOME}" "${APP_BIN}" pipeline --mode mic --name timeout --duration 1 --fail-if-empty --transcribe-timeout 2 --device cpu --python-backend "${TIMEOUT_BACKEND}" >"${TIMEOUT_PIPE_HOME}/stdout.txt" 2>"${TIMEOUT_PIPE_HOME}/stderr.txt"
+TIMEOUT_PIPE_EXIT=$?
+set -e
+TIMEOUT_ELAPSED=$(( $(date +%s) - TIMEOUT_STARTED_AT ))
+if [[ ${TIMEOUT_PIPE_EXIT} -eq 0 ]]; then
+  print -u2 "error: timeout fake-backend pipeline unexpectedly succeeded"
+  head -80 "${TIMEOUT_PIPE_HOME}/stdout.txt" >&2 || true
+  head -80 "${TIMEOUT_PIPE_HOME}/stderr.txt" >&2 || true
+  exit 1
+fi
+if [[ ${TIMEOUT_ELAPSED} -gt 12 ]]; then
+  print -u2 "error: timeout fake-backend pipeline took too long (${TIMEOUT_ELAPSED}s)"
+  head -80 "${TIMEOUT_PIPE_HOME}/stdout.txt" >&2 || true
+  head -80 "${TIMEOUT_PIPE_HOME}/stderr.txt" >&2 || true
+  exit 1
+fi
+TIMEOUT_METADATA_PATH="$(find "${TIMEOUT_PIPE_HOME}" -maxdepth 4 -name metadata.json -type f | head -1)"
+if [[ -z "${TIMEOUT_METADATA_PATH}" ]]; then
+  print -u2 "error: timeout fake-backend pipeline did not write metadata.json"
+  head -80 "${TIMEOUT_PIPE_HOME}/stdout.txt" >&2 || true
+  head -80 "${TIMEOUT_PIPE_HOME}/stderr.txt" >&2 || true
+  exit 1
+fi
+validate_metadata "${TIMEOUT_METADATA_PATH}"
+python3 - "${TIMEOUT_METADATA_PATH}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+metadata_path = Path(sys.argv[1])
+payload = json.loads(metadata_path.read_text())
+notes = payload.get("notes") or ""
+if "Process timed out" not in notes:
+    raise SystemExit(f"expected timeout notes, got: {notes!r}")
+PY
+print "Timeout fake-backend pipeline metadata: ${TIMEOUT_METADATA_PATH} (${TIMEOUT_ELAPSED}s)"
+
 print "Validation complete. Smoke artifacts: ${SMOKE_DIR}"
