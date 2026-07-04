@@ -288,4 +288,53 @@ if "fake transcript" not in text_path.read_text(encoding="utf-8"):
 PY
 print "Successful fake-backend pipeline metadata: ${FAKE_METADATA_PATH}"
 
+print "== Failing pipeline smoke test with fake backend =="
+FAILING_BACKEND="${SMOKE_DIR}/fake-backend-failing"
+mkdir -p "${FAILING_BACKEND}/stt_vibevoice"
+touch "${FAILING_BACKEND}/stt_vibevoice/__init__.py"
+cat >"${FAILING_BACKEND}/stt_vibevoice/transcribe.py" <<'PY'
+from __future__ import annotations
+
+import sys
+
+print("fake backend intentional failure", file=sys.stderr)
+raise SystemExit(7)
+PY
+FAILING_PIPE_HOME="${SMOKE_DIR}/pipeline-failing-home-$(date +%Y%m%d%H%M%S)"
+mkdir -p "${FAILING_PIPE_HOME}"
+set +e
+STT_HOME="${FAILING_PIPE_HOME}" "${APP_BIN}" pipeline --mode mic --name failing --duration 1 --fail-if-empty --transcribe-timeout 5 --device cpu --python-backend "${FAILING_BACKEND}" >"${FAILING_PIPE_HOME}/stdout.txt" 2>"${FAILING_PIPE_HOME}/stderr.txt"
+FAILING_PIPE_EXIT=$?
+set -e
+if [[ ${FAILING_PIPE_EXIT} -eq 0 ]]; then
+  print -u2 "error: failing fake-backend pipeline unexpectedly succeeded"
+  head -80 "${FAILING_PIPE_HOME}/stdout.txt" >&2 || true
+  head -80 "${FAILING_PIPE_HOME}/stderr.txt" >&2 || true
+  exit 1
+fi
+FAILING_METADATA_PATH="$(find "${FAILING_PIPE_HOME}" -maxdepth 4 -name metadata.json -type f | head -1)"
+if [[ -z "${FAILING_METADATA_PATH}" ]]; then
+  print -u2 "error: failing fake-backend pipeline did not write metadata.json"
+  head -80 "${FAILING_PIPE_HOME}/stdout.txt" >&2 || true
+  head -80 "${FAILING_PIPE_HOME}/stderr.txt" >&2 || true
+  exit 1
+fi
+validate_metadata "${FAILING_METADATA_PATH}"
+python3 - "${FAILING_METADATA_PATH}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+metadata_path = Path(sys.argv[1])
+payload = json.loads(metadata_path.read_text())
+notes = payload.get("notes") or ""
+if not notes.startswith("Pipeline failed:"):
+    raise SystemExit(f"expected Pipeline failed notes, got: {notes!r}")
+for key in ("transcriptTextPath", "transcriptJSONPath"):
+    path_value = payload.get(key)
+    if path_value and Path(path_value).exists():
+        raise SystemExit(f"unexpected transcript output exists for failing backend: {path_value}")
+PY
+print "Failing fake-backend pipeline metadata: ${FAILING_METADATA_PATH}"
+
 print "Validation complete. Smoke artifacts: ${SMOKE_DIR}"

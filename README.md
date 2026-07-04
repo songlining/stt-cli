@@ -45,6 +45,7 @@ This runs:
 - Pipeline metadata smoke test
 - Standalone transcribe smoke test with a generated fake backend
 - Successful pipeline smoke test with a generated fake backend
+- Failing pipeline smoke test with a generated fake backend
 
 By default validation allows the transcription backend to be missing MLX dependencies, so recording and metadata checks still run on a fresh machine. To require full backend readiness:
 
