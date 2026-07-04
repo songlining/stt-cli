@@ -64,12 +64,13 @@ The optional check fails if the system fallback output is header-only/suspicious
 
 ```bash
 ./scripts/build-app-bundle.sh
+./scripts/check-app-bundle.sh
 ./dist/stt.app/Contents/MacOS/stt doctor
 ./dist/stt.app/Contents/MacOS/stt doctor --python-backend ./python
 ./dist/stt.app/Contents/MacOS/stt doctor --require-backend-ready
 ```
 
-The app bundle uses bundle identifier `com.hashicorp.stt` by default and packages the local `python/stt_vibevoice` module under `Contents/Resources/python`, so `doctor`, `transcribe`, and `pipeline` can locate the backend module even when launched outside the repo root. Python dependencies still come from the selected Python environment.
+The app bundle uses bundle identifier `com.hashicorp.stt` by default and packages the local `python/stt_vibevoice` module under `Contents/Resources/python`, so `doctor`, `transcribe`, and `pipeline` can locate the backend module even when launched outside the repo root. Python dependencies still come from the selected Python environment. `scripts/check-app-bundle.sh` statically verifies the bundle identifier, TCC usage-description strings, and microphone entitlement without launching the app.
 
 Override the bundle ID for local experiments:
 

@@ -18,6 +18,7 @@ cd "${REPO_ROOT}"
 print "== Shell script syntax =="
 zsh -n scripts/bootstrap-python-backend.sh
 zsh -n scripts/build-app-bundle.sh
+zsh -n scripts/check-app-bundle.sh
 zsh -n scripts/manual-tcc-smoke.sh
 zsh -n scripts/validate.sh
 zsh -n scripts/lib/bundle-check.sh
@@ -67,7 +68,7 @@ print "== App bundle =="
 ./scripts/build-app-bundle.sh
 "${APP_BIN}" doctor
 codesign --verify --deep --strict --verbose=2 dist/stt.app
-assert_app_bundle_tcc_configuration "${REPO_ROOT}/dist/stt.app" "${BUNDLE_ID:-com.hashicorp.stt}"
+./scripts/check-app-bundle.sh "${REPO_ROOT}/dist/stt.app"
 
 PACKAGED_BACKEND="${REPO_ROOT}/dist/stt.app/Contents/Resources/python/stt_vibevoice/status.py"
 if [[ ! -f "${PACKAGED_BACKEND}" ]]; then
