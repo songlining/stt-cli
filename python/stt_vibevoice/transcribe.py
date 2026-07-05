@@ -52,6 +52,35 @@ MLX_INSTALL_HINT = (
 )
 
 
+def _install_transformers_newline_tokenizer_compat() -> None:
+    """Work around mlx-lm's Transformers 5 tokenizer registration bug.
+
+    mlx-lm 0.31.x registers its internal NewlineTokenizer with
+    `AutoTokenizer.register("NewlineTokenizer", ...)`. Transformers 5 expects a
+    config class there and raises AttributeError for the string before VibeVoice
+    transcription can start. The registration is unrelated to the VibeVoice ASR
+    model path, so treating string-based registrations as a no-op preserves the
+    supported mlx-audio/Transformers dependency set while avoiding the import
+    crash.
+    """
+    try:
+        from transformers import AutoTokenizer  # type: ignore
+    except Exception:
+        return
+
+    current_register = getattr(AutoTokenizer, "register", None)
+    if current_register is None or getattr(current_register, "_stt_string_compat", False):
+        return
+
+    def register_compat(config_class, *args, **kwargs):
+        if isinstance(config_class, str):
+            return None
+        return current_register(config_class, *args, **kwargs)
+
+    register_compat._stt_string_compat = True  # type: ignore[attr-defined]
+    AutoTokenizer.register = register_compat  # type: ignore[method-assign]
+
+
 def _import_mlx_backend():
     """Lazily import mlx / mlx_audio.stt.generate.
 
@@ -62,6 +91,7 @@ def _import_mlx_backend():
     import mlx.core as mx  # type: ignore
     from mlx_audio.stt.generate import generate_transcription  # type: ignore
 
+    _install_transformers_newline_tokenizer_compat()
     return mx, generate_transcription
 
 
