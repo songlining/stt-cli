@@ -39,6 +39,31 @@ struct PythonTranscriberTests {
         #expect(arguments == ["-m", "stt_vibevoice.transcribe", "meeting.wav", "--device", "auto"])
     }
 
+    @Test func locatePythonPrefersRuntimeVirtualenvInterpreter() throws {
+        let runtimeRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let venvBin = runtimeRoot.appendingPathComponent(".venv/bin")
+        try FileManager.default.createDirectory(at: venvBin, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: runtimeRoot) }
+
+        let pythonPath = venvBin.appendingPathComponent("python")
+        try "#!/bin/sh\n".write(to: pythonPath, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: pythonPath.path)
+
+        let resolved = PythonTranscriber.locatePython3(environment: ["STT_VIBEVOICE_RUNTIME": runtimeRoot.path])
+
+        #expect(resolved == pythonPath.path)
+    }
+
+    @Test func locatePythonFallsBackWhenRuntimeVirtualenvInterpreterIsMissing() throws {
+        let runtimeRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: runtimeRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: runtimeRoot) }
+
+        let resolved = PythonTranscriber.locatePython3(environment: ["STT_VIBEVOICE_RUNTIME": runtimeRoot.path])
+
+        #expect(resolved != runtimeRoot.appendingPathComponent(".venv/bin/python").path)
+    }
+
     @Test func parsesJSONSurroundedByLogLines() throws {
         let stdout = """
         [backend] loading model

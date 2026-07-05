@@ -68,9 +68,18 @@ public enum PythonTranscriberError: Error, LocalizedError {
 /// backend's JSON result.
 public enum PythonTranscriber {
 
-    /// Locates a usable python3 interpreter, preferring `python3` on PATH.
-    public static func locatePython3() -> String? {
-        ProcessRunner.resolvePath("python3") ?? ProcessRunner.resolvePath("python")
+    /// Locates a usable Python interpreter, preferring the configured
+    /// STT_VIBEVOICE_RUNTIME virtualenv before falling back to PATH.
+    public static func locatePython3(environment: [String: String] = ProcessInfo.processInfo.environment) -> String? {
+        if let runtimeRoot = environment["STT_VIBEVOICE_RUNTIME"], !runtimeRoot.isEmpty {
+            let venvPython = URL(fileURLWithPath: runtimeRoot)
+                .appendingPathComponent(".venv/bin/python")
+                .path
+            if FileManager.default.isExecutableFile(atPath: venvPython) {
+                return venvPython
+            }
+        }
+        return ProcessRunner.resolvePath("python3") ?? ProcessRunner.resolvePath("python")
     }
 
     /// Runs the Python backend's environment status report. This is safe for

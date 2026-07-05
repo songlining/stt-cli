@@ -111,10 +111,10 @@ if [[ "${RUN_CHECK}" == "1" ]]; then
   print "== Backend readiness check =="
   set +e
   STT_VIBEVOICE_RUNTIME="${RUNTIME_ROOT}" PYTHONPATH="${REPO_ROOT}/python" "${VENV_PYTHON}" -m stt_vibevoice.status --fail-if-not-ready
-  status=$?
+  check_exit=$?
   set -e
-  if [[ ${status} -ne 0 ]]; then
+  if [[ ${check_exit} -ne 0 ]]; then
     print -u2 "Backend is not fully ready yet. If MLX modules are missing, rerun with --mlx."
-    exit ${status}
+    exit ${check_exit}
   fi
 fi
