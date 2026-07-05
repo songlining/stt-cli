@@ -74,6 +74,15 @@ public struct Doctor: ParsableCommand {
         if tapDiagnostic.availability.isPotentiallyAvailable && !tapDiagnostic.createDestroyAttempted {
             print("  set STT_NATIVE_TAP_DIAGNOSTIC=1 to run an opt-in CoreAudio tap create/destroy diagnostic.")
         }
+        if tapDiagnostic.availability.isPotentiallyAvailable {
+            let attemptPayloadDiagnostic = ProcessInfo.processInfo.environment["STT_NATIVE_TAP_PAYLOAD_DIAGNOSTIC"] == "1"
+            let payloadDiagnostic = SystemAudioRecorder.probeNativeTapPayloadDiagnostic(attempt: attemptPayloadDiagnostic)
+            if attemptPayloadDiagnostic {
+                print("  payload diagnostic: \(payloadDiagnostic.summary)")
+            } else {
+                print("  set STT_NATIVE_TAP_PAYLOAD_DIAGNOSTIC=1 to run a short opt-in payload/TCC responsibility check.")
+            }
+        }
 
         print("Transcription backend:")
         var backendReadyFailure: String?

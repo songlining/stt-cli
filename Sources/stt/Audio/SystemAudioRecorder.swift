@@ -84,6 +84,59 @@ public struct NativeTapDiagnostic: Equatable, Codable {
     }
 }
 
+public struct NativeTapPayloadDiagnostic: Equatable, Codable {
+    public let availability: NativeTapAvailability
+    public let attempted: Bool
+    public let succeeded: Bool?
+    public let nonZeroSamples: Int?
+    public let peakAbsSample: Int16?
+    public let errorDescription: String?
+    public let isRunningFromAppBundle: Bool
+    public let bundleIdentifier: String?
+
+    public init(availability: NativeTapAvailability,
+                attempted: Bool,
+                succeeded: Bool? = nil,
+                nonZeroSamples: Int? = nil,
+                peakAbsSample: Int16? = nil,
+                errorDescription: String? = nil,
+                isRunningFromAppBundle: Bool,
+                bundleIdentifier: String?) {
+        self.availability = availability
+        self.attempted = attempted
+        self.succeeded = succeeded
+        self.nonZeroSamples = nonZeroSamples
+        self.peakAbsSample = peakAbsSample
+        self.errorDescription = errorDescription
+        self.isRunningFromAppBundle = isRunningFromAppBundle
+        self.bundleIdentifier = bundleIdentifier
+    }
+
+    public var summary: String {
+        guard availability.isPotentiallyAvailable else { return availability.summary }
+        guard attempted else {
+            return "Native CoreAudio process-tap payload diagnostic not run; set STT_NATIVE_TAP_PAYLOAD_DIAGNOSTIC=1 to record a short opt-in payload/TCC check."
+        }
+        if let errorDescription {
+            return "Native CoreAudio process-tap payload diagnostic failed: \(errorDescription)"
+        }
+        guard succeeded == true, let nonZeroSamples, let peakAbsSample else {
+            return "Native CoreAudio process-tap payload diagnostic did not complete."
+        }
+        if nonZeroSamples > 0 && peakAbsSample > 0 {
+            return "Native CoreAudio process-tap captured non-silent audio (non-zero samples: \(nonZeroSamples), peak: \(peakAbsSample)); system-audio capture is verified for the current TCC identity."
+        }
+
+        let identity = isRunningFromAppBundle
+            ? (bundleIdentifier ?? "this app bundle")
+            : "your terminal app (Ghostty/Terminal/iTerm), because the binary was launched from a shell"
+        let action = isRunningFromAppBundle
+            ? "Grant System Audio Recording permission to \(bundleIdentifier ?? "stt") in System Settings > Privacy & Security > Screen & System Audio Recording."
+            : "Grant System Audio Recording permission to the terminal app in System Settings > Privacy & Security > Screen & System Audio Recording, or launch through the .app bundle with LaunchServices."
+        return "Native CoreAudio process-tap ran but captured silence (all-zero samples). macOS likely denied system-audio payload to \(identity). \(action)"
+    }
+}
+
 public enum SystemAudioRecorderError: Error, LocalizedError {
     case tapUnavailable(String)
     case nativeCaptureFailed(String)
@@ -234,6 +287,65 @@ public final class SystemAudioRecorder {
             destroyOSStatus: nil,
             tapID: nil
         )
+    }
+
+    public static func probeNativeTapPayloadDiagnostic(duration: TimeInterval = 1.5,
+                                                       attempt: Bool = false) -> NativeTapPayloadDiagnostic {
+        let availability = probeNativeTapAvailability()
+        let runningFromBundle = BundleAttribution.isRunningFromAppBundle(bundlePath: Bundle.main.bundlePath)
+        let bundleID = Bundle.main.bundleIdentifier
+        guard availability.isPotentiallyAvailable else {
+            return NativeTapPayloadDiagnostic(
+                availability: availability,
+                attempted: false,
+                isRunningFromAppBundle: runningFromBundle,
+                bundleIdentifier: bundleID
+            )
+        }
+        guard attempt else {
+            return NativeTapPayloadDiagnostic(
+                availability: availability,
+                attempted: false,
+                isRunningFromAppBundle: runningFromBundle,
+                bundleIdentifier: bundleID
+            )
+        }
+
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("stt-native-tap-payload-\(UUID().uuidString).wav")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+
+        do {
+            let bridge = try NativeTapWAVBridge(outputURL: tempURL)
+            let lifecycle = NativeTapLifecycle(
+                tapDescription: NativeTapLifecycle.defaultTapDescription(name: "stt native tap payload diagnostic"),
+                aggregateName: "stt native tap payload diagnostic aggregate",
+                audioBridge: bridge
+            )
+            try lifecycle.start()
+            Thread.sleep(forTimeInterval: max(0.1, duration))
+            _ = try lifecycle.stop()
+            _ = try bridge.finish()
+            let snapshot = bridge.payloadSnapshot()
+            return NativeTapPayloadDiagnostic(
+                availability: availability,
+                attempted: true,
+                succeeded: true,
+                nonZeroSamples: snapshot.nonZeroSamples,
+                peakAbsSample: snapshot.peakAbsSample,
+                isRunningFromAppBundle: runningFromBundle,
+                bundleIdentifier: bundleID
+            )
+        } catch {
+            return NativeTapPayloadDiagnostic(
+                availability: availability,
+                attempted: true,
+                succeeded: false,
+                errorDescription: error.localizedDescription,
+                isRunningFromAppBundle: runningFromBundle,
+                bundleIdentifier: bundleID
+            )
+        }
     }
 
     private static func coreAudioSymbolAvailable(_ symbol: String) -> Bool {

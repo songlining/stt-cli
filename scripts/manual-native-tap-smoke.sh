@@ -37,8 +37,8 @@ print "== Build bundled app =="
 ./scripts/build-app-bundle.sh
 assert_app_bundle_tcc_configuration "${REPO_ROOT}/dist/stt.app" "${BUNDLE_ID}"
 
-print "== Doctor with opt-in native tap diagnostic =="
-STT_NATIVE_TAP_DIAGNOSTIC=1 "${APP_BIN}" doctor
+print "== Doctor with opt-in native tap diagnostics =="
+STT_NATIVE_TAP_DIAGNOSTIC=1 STT_NATIVE_TAP_PAYLOAD_DIAGNOSTIC=1 "${APP_BIN}" doctor
 
 print "== Native system recording (${DURATION}s) =="
 mkdir -p "${SMOKE_DIR}"
@@ -78,6 +78,31 @@ assert_audio_file_has_payload \
   "${SYSTEM_WAV}" \
   "native CoreAudio process-tap smoke" \
   "Native capture produced no meaningful payload. Ensure system audio was playing and TCC permissions were granted for ${BUNDLE_ID}."
+
+python3 - "${SYSTEM_WAV}" "${BUNDLE_ID}" <<'PY'
+import struct
+import sys
+import wave
+from pathlib import Path
+
+audio_path = Path(sys.argv[1])
+bundle_id = sys.argv[2]
+with wave.open(str(audio_path), "rb") as wav:
+    frames = wav.readframes(wav.getnframes())
+    samples = struct.unpack("<" + "h" * (len(frames) // 2), frames)
+nonzero = sum(1 for sample in samples if sample)
+peak = max((abs(sample) for sample in samples), default=0)
+print(f"payload samples={len(samples)} nonzero={nonzero} peak={peak}")
+if nonzero == 0 or peak == 0:
+    raise SystemExit(
+        "native CoreAudio process-tap ran but captured all-zero/silent payload. "
+        "If launched from a terminal, macOS attributes System Audio Recording permission "
+        "to the terminal app (Ghostty/Terminal/iTerm), not necessarily to "
+        f"{bundle_id}. Grant System Audio Recording to the responsible app in "
+        "System Settings > Privacy & Security > Screen & System Audio Recording, "
+        "then rerun this smoke test."
+    )
+PY
 
 print "== Manual check =="
 print "Confirm the captured WAV contains the system audio that was playing."

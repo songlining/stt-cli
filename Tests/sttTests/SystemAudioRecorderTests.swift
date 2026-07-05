@@ -75,29 +75,78 @@ struct SystemAudioRecorderTests {
         #expect(unavailable.summary.contains("macOS 14.4+"))
 
         let notAttempted = NativeTapDiagnostic(
-            availability: NativeTapAvailability(
-                osVersionSupported: true,
-                createProcessTapSymbolAvailable: true,
-                destroyProcessTapSymbolAvailable: true,
-                createAggregateDeviceSymbolAvailable: true
-            ),
+            availability: Self.availableNativeTap(),
             createDestroyAttempted: false
         )
         #expect(notAttempted.summary.contains("STT_NATIVE_TAP_DIAGNOSTIC=1"))
 
         let failed = NativeTapDiagnostic(
-            availability: NativeTapAvailability(
-                osVersionSupported: true,
-                createProcessTapSymbolAvailable: true,
-                destroyProcessTapSymbolAvailable: true,
-                createAggregateDeviceSymbolAvailable: true
-            ),
+            availability: Self.availableNativeTap(),
             createDestroyAttempted: true,
             createDestroySucceeded: false,
             createOSStatus: -50,
             destroyOSStatus: nil
         )
         #expect(failed.summary.contains("create OSStatus: -50"))
+    }
+
+    @Test func nativeTapPayloadDiagnosticSummariesAreActionable() {
+        let notAttempted = NativeTapPayloadDiagnostic(
+            availability: Self.availableNativeTap(),
+            attempted: false,
+            isRunningFromAppBundle: false,
+            bundleIdentifier: nil
+        )
+        #expect(notAttempted.summary.contains("STT_NATIVE_TAP_PAYLOAD_DIAGNOSTIC=1"))
+
+        let terminalSilent = NativeTapPayloadDiagnostic(
+            availability: Self.availableNativeTap(),
+            attempted: true,
+            succeeded: true,
+            nonZeroSamples: 0,
+            peakAbsSample: 0,
+            isRunningFromAppBundle: false,
+            bundleIdentifier: nil
+        )
+        #expect(terminalSilent.summary.contains("captured silence"))
+        #expect(terminalSilent.summary.contains("terminal app"))
+        #expect(terminalSilent.summary.contains("System Audio Recording"))
+
+        let bundleSilent = NativeTapPayloadDiagnostic(
+            availability: Self.availableNativeTap(),
+            attempted: true,
+            succeeded: true,
+            nonZeroSamples: 0,
+            peakAbsSample: 0,
+            isRunningFromAppBundle: true,
+            bundleIdentifier: "com.larrysong.stt"
+        )
+        #expect(bundleSilent.summary.contains("com.larrysong.stt"))
+
+        let success = NativeTapPayloadDiagnostic(
+            availability: Self.availableNativeTap(),
+            attempted: true,
+            succeeded: true,
+            nonZeroSamples: 123,
+            peakAbsSample: 456,
+            isRunningFromAppBundle: false,
+            bundleIdentifier: nil
+        )
+        #expect(success.summary.contains("captured non-silent audio"))
+        #expect(success.summary.contains("peak: 456"))
+    }
+
+    @Test func nativeTapPayloadStatsCountNonZeroSamplesAndPeak() {
+        let samples: [Int16] = [0, 100, -200, Int16.min]
+        let pcm = samples.reduce(into: Data()) { data, sample in
+            var value = sample.littleEndian
+            withUnsafeBytes(of: &value) { data.append(contentsOf: $0) }
+        }
+
+        let stats = NativeTapWAVBridge.payloadStats(for: pcm)
+
+        #expect(stats.nonZeroSamples == 3)
+        #expect(stats.peakAbsSample == Int16.max)
     }
 
     @Test func nativeTapAggregateDescriptionContainsPrivateTap() throws {

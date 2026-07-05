@@ -120,12 +120,19 @@ final class NativeProcessTapResource {
 /// The IOProc path copies/normalizes input buffers into Int16 interleaved PCM
 /// and appends on a dedicated serial queue. `finish()` drains that queue before
 /// patching the WAV header, so late queued writes cannot race header finalization.
+struct NativeTapPayloadSnapshot: Equatable {
+    let nonZeroSamples: Int
+    let peakAbsSample: Int16
+}
+
 final class NativeTapWAVBridge: @unchecked Sendable {
     private let writer: StreamingWAVWriter
     private let queue = DispatchQueue(label: "com.larrysong.stt.native-tap.wav-writer")
     private let lock = NSLock()
     private var acceptingBuffers = true
     private var appendError: Error?
+    private var nonZeroSampleCount = 0
+    private var peakAbsSample: Int16 = 0
 
     let sampleRate: UInt32
     let channels: UInt16
@@ -150,6 +157,7 @@ final class NativeTapWAVBridge: @unchecked Sendable {
             let shouldWrite = self.acceptingBuffers
             self.lock.unlock()
             guard shouldWrite else { return }
+            self.updatePayloadStats(with: pcm)
             do {
                 try self.writer.append(pcm)
             } catch {
@@ -176,6 +184,37 @@ final class NativeTapWAVBridge: @unchecked Sendable {
     }
 
     var durationSeconds: Double { writer.durationSeconds }
+
+    func payloadSnapshot() -> NativeTapPayloadSnapshot {
+        queue.sync {}
+        lock.lock()
+        defer { lock.unlock() }
+        return NativeTapPayloadSnapshot(nonZeroSamples: nonZeroSampleCount, peakAbsSample: peakAbsSample)
+    }
+
+    private func updatePayloadStats(with pcm: Data) {
+        // Track what CoreAudio delivered even if a later file append fails;
+        // diagnostics should distinguish payload/TCC problems from writer errors.
+        let stats = Self.payloadStats(for: pcm)
+        lock.lock()
+        nonZeroSampleCount += stats.nonZeroSamples
+        peakAbsSample = max(peakAbsSample, stats.peakAbsSample)
+        lock.unlock()
+    }
+
+    static func payloadStats(for pcm: Data) -> NativeTapPayloadSnapshot {
+        // NativeTapWAVBridge only passes complete Int16 PCM buffers here.
+        var nonZero = 0
+        var peak: Int16 = 0
+        pcm.withUnsafeBytes { rawBuffer in
+            for sample in rawBuffer.bindMemory(to: Int16.self) {
+                let value = Int16(littleEndian: sample)
+                if value != 0 { nonZero += 1 }
+                peak = max(peak, absClamped(value))
+            }
+        }
+        return NativeTapPayloadSnapshot(nonZeroSamples: nonZero, peakAbsSample: peak)
+    }
 
     static func int16PCM(from inputData: UnsafePointer<AudioBufferList>?, targetChannels: Int = 2) -> Data? {
         guard let inputData, targetChannels > 0 else { return nil }
@@ -226,6 +265,11 @@ final class NativeTapWAVBridge: @unchecked Sendable {
         let clamped = max(-1.0, min(1.0, sample))
         let scaled = clamped < 0 ? clamped * 32768.0 : clamped * 32767.0
         return Int16(scaled).littleEndian
+    }
+
+    private static func absClamped(_ sample: Int16) -> Int16 {
+        if sample == Int16.min { return Int16.max }
+        return abs(sample)
     }
 }
 
