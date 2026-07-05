@@ -5,7 +5,7 @@ set -euo pipefail
 #
 # This script is intentionally opt-in and is not executed by validate.sh/CI. It
 # requires macOS system audio to be playing during the recording window and may
-# require a first-run TCC prompt attributed to stt/com.hashicorp.stt.
+# require a first-run TCC prompt attributed to stt/com.larrysong.stt.
 #
 # Usage:
 #   ./scripts/manual-native-tap-smoke.sh
@@ -16,7 +16,7 @@ set -euo pipefail
 
 SCRIPT_DIR="${0:A:h}"
 REPO_ROOT="${SCRIPT_DIR:h}"
-BUNDLE_ID="${BUNDLE_ID:-com.hashicorp.stt}"
+BUNDLE_ID="${BUNDLE_ID:-com.larrysong.stt}"
 APP_BIN="${REPO_ROOT}/dist/stt.app/Contents/MacOS/stt"
 SMOKE_ROOT="${SMOKE_DIR:-/tmp/stt-native-tap-smoke}"
 SMOKE_DIR="${SMOKE_ROOT}/$(date +%Y%m%d-%H%M%S)"

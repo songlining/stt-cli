@@ -8,7 +8,7 @@ set -euo pipefail
 SCRIPT_DIR="${0:A:h}"
 REPO_ROOT="${SCRIPT_DIR:h}"
 APP_DIR="${1:-${REPO_ROOT}/dist/stt.app}"
-EXPECTED_BUNDLE_ID="${BUNDLE_ID:-com.hashicorp.stt}"
+EXPECTED_BUNDLE_ID="${BUNDLE_ID:-com.larrysong.stt}"
 
 source "${REPO_ROOT}/scripts/lib/bundle-check.sh"
 

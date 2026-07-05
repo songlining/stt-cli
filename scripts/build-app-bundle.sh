@@ -9,7 +9,7 @@ set -euo pipefail
 SCRIPT_DIR="${0:A:h}"
 REPO_ROOT="${SCRIPT_DIR:h}"
 CONFIGURATION="${CONFIGURATION:-debug}"
-BUNDLE_ID="${BUNDLE_ID:-com.hashicorp.stt}"
+BUNDLE_ID="${BUNDLE_ID:-com.larrysong.stt}"
 APP_NAME="${APP_NAME:-stt}"
 DIST_DIR="${DIST_DIR:-${REPO_ROOT}/dist}"
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"

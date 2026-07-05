@@ -94,7 +94,7 @@ CI intentionally does not install MLX, reset TCC, open the microphone, validate 
 ./dist/stt.app/Contents/MacOS/stt doctor --require-backend-ready
 ```
 
-The app bundle uses bundle identifier `com.hashicorp.stt` by default and packages the local `python/stt_vibevoice` module under `Contents/Resources/python`, so `doctor`, `transcribe`, and `pipeline` can locate the backend module even when launched outside the repo root. Python dependencies still come from the selected Python environment. `scripts/check-app-bundle.sh` statically verifies the bundle identifier, TCC usage-description strings, and microphone entitlement without launching the app.
+The app bundle uses bundle identifier `com.larrysong.stt` by default and packages the local `python/stt_vibevoice` module under `Contents/Resources/python`, so `doctor`, `transcribe`, and `pipeline` can locate the backend module even when launched outside the repo root. Python dependencies still come from the selected Python environment. `scripts/check-app-bundle.sh` statically verifies the bundle identifier, TCC usage-description strings, and microphone entitlement without launching the app.
 
 Override the bundle ID for local experiments:
 
@@ -124,7 +124,7 @@ Run with a microphone permission reset for the app bundle ID:
 STT_RESET_TCC=1 ./scripts/manual-tcc-smoke.sh
 ```
 
-When using `STT_RESET_TCC=1`, confirm the macOS microphone prompt is attributed to `stt` / `com.hashicorp.stt`, not Terminal.
+When using `STT_RESET_TCC=1`, confirm the macOS microphone prompt is attributed to `stt` / `com.larrysong.stt`, not Terminal.
 
 To validate native CoreAudio process-tap system capture with real system audio playing:
 

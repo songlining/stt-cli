@@ -767,7 +767,7 @@ public struct Permissions: ParsableCommand {
         public init() {}
 
         public func run() throws {
-            let bundleID = bundleID ?? Bundle.main.bundleIdentifier ?? "com.hashicorp.stt"
+            let bundleID = bundleID ?? Bundle.main.bundleIdentifier ?? "com.larrysong.stt"
             print(AudioPermissions.tccAttributionGuidance(bundleID: bundleID))
             print("")
             print(AudioPermissions.microphoneResetGuidance(bundleID: bundleID))

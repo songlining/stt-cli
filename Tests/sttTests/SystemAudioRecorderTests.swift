@@ -104,12 +104,12 @@ struct SystemAudioRecorderTests {
         let tapUUID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
         let description = NativeTapLifecycle.aggregateDescription(
             name: "stt test aggregate",
-            uid: "com.hashicorp.stt.test.aggregate",
+            uid: "com.larrysong.stt.test.aggregate",
             tapUUID: tapUUID
         ) as NSDictionary
 
         #expect(description["name"] as? String == "stt test aggregate")
-        #expect(description["uid"] as? String == "com.hashicorp.stt.test.aggregate")
+        #expect(description["uid"] as? String == "com.larrysong.stt.test.aggregate")
         #expect(description["private"] as? Bool == true)
         #expect(description["tapautostart"] as? Bool == false)
 
@@ -181,7 +181,7 @@ struct SystemAudioRecorderTests {
         let lifecycle = NativeTapLifecycle(
             tapDescription: NativeTapLifecycle.defaultTapDescription(name: "stt test tap"),
             aggregateName: "stt test aggregate",
-            aggregateUID: "com.hashicorp.stt.test.aggregate",
+            aggregateUID: "com.larrysong.stt.test.aggregate",
             operations: operations,
             availabilityProvider: Self.availableNativeTap
         )

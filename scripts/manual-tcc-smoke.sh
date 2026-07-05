@@ -9,11 +9,11 @@ set -euo pipefail
 #   STT_RESET_TCC=1 ./scripts/manual-tcc-smoke.sh
 #
 # The reset is intentionally opt-in because it changes local privacy state for
-# com.hashicorp.stt.
+# com.larrysong.stt.
 
 SCRIPT_DIR="${0:A:h}"
 REPO_ROOT="${SCRIPT_DIR:h}"
-BUNDLE_ID="${BUNDLE_ID:-com.hashicorp.stt}"
+BUNDLE_ID="${BUNDLE_ID:-com.larrysong.stt}"
 APP_BIN="${REPO_ROOT}/dist/stt.app/Contents/MacOS/stt"
 SMOKE_DIR="${SMOKE_DIR:-/tmp/stt-tcc-smoke}"
 MIC_WAV="${SMOKE_DIR}/mic.wav"
@@ -56,5 +56,5 @@ run_optional_system_fallback_smoke \
   "Check that ${STT_SYSTEM_DEVICE:-the selected device} is receiving routed system audio."
 
 print "== Manual check =="
-print "If STT_RESET_TCC=1 was used, confirm the macOS prompt named stt/com.hashicorp.stt, not Terminal."
+print "If STT_RESET_TCC=1 was used, confirm the macOS prompt named stt/com.larrysong.stt, not Terminal."
 print "Smoke artifact: ${MIC_WAV}"

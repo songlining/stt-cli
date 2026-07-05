@@ -82,7 +82,7 @@ if [[ ! -f "${PACKAGED_BACKEND}" ]]; then
 fi
 
 print "== Custom bundle ID smoke test =="
-CUSTOM_BUNDLE_ID="com.hashicorp.stt.validate"
+CUSTOM_BUNDLE_ID="com.larrysong.stt.validate"
 CUSTOM_DIST_DIR="${SMOKE_DIR}/dist-custom"
 CUSTOM_APP_BIN="${CUSTOM_DIST_DIR}/stt.app/Contents/MacOS/stt"
 DIST_DIR="${CUSTOM_DIST_DIR}" BUNDLE_ID="${CUSTOM_BUNDLE_ID}" ./scripts/build-app-bundle.sh >/dev/null

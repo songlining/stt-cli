@@ -122,7 +122,7 @@ final class NativeProcessTapResource {
 /// patching the WAV header, so late queued writes cannot race header finalization.
 final class NativeTapWAVBridge: @unchecked Sendable {
     private let writer: StreamingWAVWriter
-    private let queue = DispatchQueue(label: "com.hashicorp.stt.native-tap.wav-writer")
+    private let queue = DispatchQueue(label: "com.larrysong.stt.native-tap.wav-writer")
     private let lock = NSLock()
     private var acceptingBuffers = true
     private var appendError: Error?
@@ -253,7 +253,7 @@ final class NativeTapLifecycle {
     private let aggregateName: String
     private let aggregateUID: String
     private let audioBridge: NativeTapWAVBridge?
-    private let ioQueue = DispatchQueue(label: "com.hashicorp.stt.native-tap.ioproc")
+    private let ioQueue = DispatchQueue(label: "com.larrysong.stt.native-tap.ioproc")
 
     private var tapResource: NativeProcessTapResource?
     private var aggregateDeviceID: AudioObjectID?
@@ -268,7 +268,7 @@ final class NativeTapLifecycle {
 
     init(tapDescription: CATapDescription,
          aggregateName: String = "stt native tap aggregate",
-         aggregateUID: String = "com.hashicorp.stt.native-tap.aggregate.\(UUID().uuidString)",
+         aggregateUID: String = "com.larrysong.stt.native-tap.aggregate.\(UUID().uuidString)",
          audioBridge: NativeTapWAVBridge? = nil,
          operations: NativeTapCoreAudioOperations = .live,
          availabilityProvider: @escaping () -> NativeTapAvailability = SystemAudioRecorder.probeNativeTapAvailability) {

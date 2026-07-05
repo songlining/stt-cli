@@ -5,7 +5,7 @@ import Foundation
 /// the Phase 1 TCC attribution guidance unit-testable without prompting for any
 /// permissions.
 public enum BundleAttribution {
-    public static let recommendedBundleIdentifier = "com.hashicorp.stt"
+    public static let recommendedBundleIdentifier = "com.larrysong.stt"
 
     public static func isRunningFromAppBundle(bundlePath: String?) -> Bool {
         guard let bundlePath, !bundlePath.isEmpty else { return false }
