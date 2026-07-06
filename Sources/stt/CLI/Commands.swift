@@ -156,6 +156,18 @@ public enum RecordModeArgument: String, ExpressibleByArgument, CaseIterable {
     case meeting
 }
 
+public enum MixModeArgument: String, ExpressibleByArgument, CaseIterable {
+    case raw
+    case balanced
+
+    public var mixMode: MixMode {
+        switch self {
+        case .raw: return .raw
+        case .balanced: return .balanced
+        }
+    }
+}
+
 public struct Record: ParsableCommand {
     public static let configuration = CommandConfiguration(abstract: "Record microphone, system, or meeting audio to WAV.")
 
@@ -179,6 +191,9 @@ public struct Record: ParsableCommand {
 
     @Option(name: .long, help: "Output directory for meeting mode (used with --separate-tracks).")
     public var outputDir: String?
+
+    @Option(name: .long, help: "Mixing strategy for mixed.wav in meeting mode: raw or balanced (default: balanced).")
+    public var mixMode: MixModeArgument = .balanced
 
     public init() {}
 
@@ -288,7 +303,7 @@ public struct Record: ParsableCommand {
 
         if !separateTracks, let mic = result.micResult, let system = result.systemResult {
             let mixedURL = baseDir.appendingPathComponent("mixed.wav")
-            let mixOutcome = Self.resolveMeetingMixOutcome(micResult: mic, systemResult: system, mixedURL: mixedURL)
+            let mixOutcome = Self.resolveMeetingMixOutcome(micResult: mic, systemResult: system, mixedURL: mixedURL, mode: mixMode.mixMode)
             if let mixed = mixOutcome.mixedResult {
                 print("Mixed track: \(mixed.outputURL.path) (\(String(format: "%.1f", mixed.durationSeconds))s, \(formatFileSize(mixed.fileSizeBytes)))")
                 if let warning = mixed.emptyAudioWarning { print(warning) }
@@ -308,9 +323,10 @@ public struct Record: ParsableCommand {
 
     public static func resolveMeetingMixOutcome(micResult: RecordingResult,
                                                 systemResult: RecordingResult,
-                                                mixedURL: URL) -> MeetingMixOutcome {
+                                                mixedURL: URL,
+                                                mode: MixMode = .balanced) -> MeetingMixOutcome {
         do {
-            let mixed = try WAVMixer.mixFiles(micResult.outputURL, systemResult.outputURL, outputURL: mixedURL)
+            let mixed = try WAVMixer.mixFiles(micResult.outputURL, systemResult.outputURL, outputURL: mixedURL, mode: mode)
             let driftNote = WAVMixer.driftWarning(lhsURL: micResult.outputURL, rhsURL: systemResult.outputURL)
             return MeetingMixOutcome(mixedResult: mixed, note: nil, driftNote: driftNote)
         } catch {
@@ -542,6 +558,9 @@ public struct Pipeline: ParsableCommand {
     @Flag(name: .long, help: "Check backend readiness before recording and fail early if dependencies are missing.")
     public var requireBackendReady: Bool = false
 
+    @Option(name: .long, help: "Mixing strategy for mixed.wav in meeting mode: raw or balanced (default: balanced).")
+    public var mixMode: MixModeArgument = .balanced
+
     public init() {}
 
     public func run() throws {
@@ -630,7 +649,7 @@ public struct Pipeline: ParsableCommand {
             try record.run()
 
             if mode == .meeting {
-                let selection = Self.resolveMeetingAudioSource(micURL: micURL, systemURL: systemURL, mixedURL: mixedURL)
+                let selection = Self.resolveMeetingAudioSource(micURL: micURL, systemURL: systemURL, mixedURL: mixedURL, mode: mixMode.mixMode)
                 audioToTranscribeURL = selection.audioToTranscribeURL
                 outputURLs = selection.outputURLs
                 state.outputPaths = outputURLs.map(\.path)
@@ -685,9 +704,9 @@ public struct Pipeline: ParsableCommand {
         _ = try Paths.requireNonEmptyFile(url.path)
     }
 
-    public static func resolveMeetingAudioSource(micURL: URL, systemURL: URL, mixedURL: URL) -> MeetingAudioSelection {
+    public static func resolveMeetingAudioSource(micURL: URL, systemURL: URL, mixedURL: URL, mode: MixMode = .balanced) -> MeetingAudioSelection {
         do {
-            _ = try WAVMixer.mixFiles(micURL, systemURL, outputURL: mixedURL)
+            _ = try WAVMixer.mixFiles(micURL, systemURL, outputURL: mixedURL, mode: mode)
             let driftNote = WAVMixer.driftWarning(lhsURL: micURL, rhsURL: systemURL)
             return MeetingAudioSelection(
                 audioToTranscribeURL: mixedURL,
@@ -723,6 +742,9 @@ public struct Mix: ParsableCommand {
     @Flag(name: .long, help: "Fail if the mixed output looks header-only or contains no audio frames.")
     public var failIfEmpty: Bool = false
 
+    @Option(name: .long, help: "Mixing strategy: raw or balanced (default: balanced).")
+    public var mixMode: MixModeArgument = .balanced
+
     public init() {}
 
     public func run() throws {
@@ -731,7 +753,7 @@ public struct Mix: ParsableCommand {
         let outputURL = output.map { URL(fileURLWithPath: $0) }
             ?? firstURL.deletingLastPathComponent().appendingPathComponent("mixed.wav")
 
-        let result = try WAVMixer.mixFiles(firstURL, secondURL, outputURL: outputURL)
+        let result = try WAVMixer.mixFiles(firstURL, secondURL, outputURL: outputURL, mode: mixMode.mixMode)
         print("Mixed: \(result.outputURL.path)")
         print("Duration: \(String(format: "%.3f", result.durationSeconds))s")
         print("File size: \(formatFileSize(result.fileSizeBytes))")

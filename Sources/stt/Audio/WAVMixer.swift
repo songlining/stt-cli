@@ -103,6 +103,17 @@ public struct WAVPCMFile: Equatable {
     }
 }
 
+public enum MixMode {
+    /// Raw PCM summation, exactly matching legacy behavior. No per-track
+    /// loudness normalization is applied. Useful as an escape hatch and for
+    /// test/back-compat purposes.
+    case raw
+    /// Loudness-balanced mix (default). Boosts whichever track is quieter
+    /// (by RMS) up to the louder track's level before summing, so a soft
+    /// system-audio capture is no longer buried under a louder mic capture.
+    case balanced
+}
+
 public enum WAVMixer {
     /// Heuristic threshold for warning that separately captured mic/system
     /// tracks may be misaligned after mix-down. Real-world drift depends on
@@ -110,7 +121,24 @@ public enum WAVMixer {
     /// non-fatal so the original tracks remain usable for manual inspection.
     public static let defaultDriftWarningThresholdSeconds: Double = 0.25
 
-    public static func mix(_ lhs: WAVPCMFile, _ rhs: WAVPCMFile) throws -> WAVPCMFile {
+    /// Samples quieter than this (in absolute Int16 magnitude) are treated as
+    /// silence and excluded from the RMS calculation, so a silent lead-in/tail
+    /// doesn't drag down a track's measured loudness.
+    private static let silenceGateThreshold: Double = 32.0
+
+    /// Maximum 16-bit PCM magnitude used when computing adaptive headroom for
+    /// balanced mixes. Balanced mode should only attenuate when the boosted sum
+    /// would clip; otherwise it preserves the captured track levels and lets
+    /// the quieter track's lift be audible.
+    private static let int16PeakMagnitude = Double(Int16.max)
+
+    /// Balanced mixes are normalized upward when the combined capture is very
+    /// quiet. Peak-based normalization avoids clipping; the gain cap prevents
+    /// near-silent noise floors from being amplified into loud artifacts.
+    private static let balancedMixTargetPeakRatio = 0.8
+    private static let balancedMixMaxOutputGain = 16.0
+
+    public static func mix(_ lhs: WAVPCMFile, _ rhs: WAVPCMFile, mode: MixMode = .balanced) throws -> WAVPCMFile {
         guard lhs.bitDepth == 16, rhs.bitDepth == 16 else {
             throw WAVMixerError.unsupportedFormat("only 16-bit PCM is supported")
         }
@@ -119,17 +147,102 @@ public enum WAVMixer {
         }
 
         let targetRate = max(lhs.sampleRate, rhs.sampleRate)
-        let lhsSamples = resample(lhs.samples, from: lhs.sampleRate, to: targetRate)
-        let rhsSamples = resample(rhs.samples, from: rhs.sampleRate, to: targetRate)
+        var lhsSamples = resample(lhs.samples, from: lhs.sampleRate, to: targetRate)
+        var rhsSamples = resample(rhs.samples, from: rhs.sampleRate, to: targetRate)
+
+        var headroomFactor = 1.0
+        if mode == .balanced {
+            let lhsRMS = rms(lhsSamples)
+            let rhsRMS = rms(rhsSamples)
+            // Policy: target the louder track's RMS and boost the quieter
+            // track up to parity. Neither track is ever attenuated below its
+            // captured level, so a quiet recording is never made quieter --
+            // only the imbalance between the two tracks is corrected.
+            if lhsRMS > 0, rhsRMS > 0 {
+                if lhsRMS > rhsRMS {
+                    let gain = lhsRMS / rhsRMS
+                    rhsSamples = scale(rhsSamples, by: gain)
+                } else if rhsRMS > lhsRMS {
+                    let gain = rhsRMS / lhsRMS
+                    lhsSamples = scale(lhsSamples, by: gain)
+                }
+            }
+        }
+
         let count = max(lhsSamples.count, rhsSamples.count)
+        if mode == .balanced {
+            headroomFactor = adaptiveHeadroomFactor(lhsSamples, rhsSamples, count: count)
+        }
+
         var mixed: [Int16] = []
         mixed.reserveCapacity(count)
         for index in 0..<count {
             let a = index < lhsSamples.count ? Int(lhsSamples[index]) : 0
             let b = index < rhsSamples.count ? Int(rhsSamples[index]) : 0
-            mixed.append(Int16(clamping: a + b))
+            if mode == .balanced {
+                let summed = (Double(a) + Double(b)) * headroomFactor
+                mixed.append(Int16(clamping: Int(summed.rounded())))
+            } else {
+                mixed.append(Int16(clamping: a + b))
+            }
+        }
+        if mode == .balanced {
+            mixed = normalizePeakUp(
+                mixed,
+                targetPeak: int16PeakMagnitude * balancedMixTargetPeakRatio,
+                maxGain: balancedMixMaxOutputGain
+            )
         }
         return WAVPCMFile(sampleRate: targetRate, samples: mixed)
+    }
+
+    /// Computes the root-mean-square level of `samples`, gating out
+    /// near-silent samples (see `silenceGateThreshold`) so a silent lead-in
+    /// or tail doesn't skew the measured loudness of an otherwise louder
+    /// track. Returns 0 if there are no non-silent samples.
+    static func rms(_ samples: [Int16]) -> Double {
+        var sumSquares = 0.0
+        var count = 0
+        for sample in samples {
+            let magnitude = abs(Double(sample))
+            guard magnitude >= silenceGateThreshold else { continue }
+            sumSquares += magnitude * magnitude
+            count += 1
+        }
+        guard count > 0 else { return 0 }
+        return (sumSquares / Double(count)).squareRoot()
+    }
+
+    /// Computes the smallest attenuation needed to keep a balanced summed mix
+    /// inside the Int16 range. Returns 1.0 unless the boosted sum would clip.
+    static func adaptiveHeadroomFactor(_ lhsSamples: [Int16], _ rhsSamples: [Int16], count: Int) -> Double {
+        var peak = 0.0
+        for index in 0..<count {
+            let a = index < lhsSamples.count ? Double(lhsSamples[index]) : 0
+            let b = index < rhsSamples.count ? Double(rhsSamples[index]) : 0
+            peak = max(peak, abs(a + b))
+        }
+        guard peak > int16PeakMagnitude else { return 1.0 }
+        return int16PeakMagnitude / peak
+    }
+
+    /// Normalizes a mix upward to `targetPeak` without ever attenuating an
+    /// already-loud result. `maxGain` limits amplification of near-silence.
+    static func normalizePeakUp(_ samples: [Int16], targetPeak: Double, maxGain: Double) -> [Int16] {
+        let peak = samples.map { abs(Double($0)) }.max() ?? 0
+        guard peak > 0, peak < targetPeak, maxGain > 1 else { return samples }
+        let gain = min(maxGain, targetPeak / peak)
+        return scale(samples, by: gain)
+    }
+
+    /// Scales `samples` by a floating-point `gain`, clamping each result to
+    /// the Int16 range to avoid overflow.
+    static func scale(_ samples: [Int16], by gain: Double) -> [Int16] {
+        guard gain != 1.0 else { return samples }
+        return samples.map { sample in
+            let scaled = Double(sample) * gain
+            return Int16(clamping: Int(scaled.rounded()))
+        }
     }
 
     private static func resample(_ samples: [Int16], from sourceRate: UInt32, to targetRate: UInt32) -> [Int16] {
@@ -178,10 +291,10 @@ public enum WAVMixer {
     }
 
     @discardableResult
-    public static func mixFiles(_ lhsURL: URL, _ rhsURL: URL, outputURL: URL) throws -> RecordingResult {
+    public static func mixFiles(_ lhsURL: URL, _ rhsURL: URL, outputURL: URL, mode: MixMode = .balanced) throws -> RecordingResult {
         let lhs = try WAVPCMFile.parse(Data(contentsOf: lhsURL))
         let rhs = try WAVPCMFile.parse(Data(contentsOf: rhsURL))
-        let mixed = try mix(lhs, rhs)
+        let mixed = try mix(lhs, rhs, mode: mode)
         try Paths.ensureDirectoryExists(outputURL.deletingLastPathComponent())
         try mixed.encodedData().write(to: outputURL, options: .atomic)
         let duration = Double(mixed.samples.count) / Double(mixed.sampleRate)

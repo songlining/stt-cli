@@ -17,6 +17,17 @@ func checkEqual<T: Equatable>(_ actual: T, _ expected: T, _ message: String) thr
     }
 }
 
+func rms(_ samples: [Int16]) -> Double {
+    let audible = samples.map { abs(Double($0)) }.filter { $0 >= 32.0 }
+    guard !audible.isEmpty else { return 0 }
+    let sumSquares = audible.reduce(0.0) { $0 + ($1 * $1) }
+    return (sumSquares / Double(audible.count)).squareRoot()
+}
+
+func peakMagnitude(_ samples: [Int16]) -> Int {
+    samples.map { abs(Int($0)) }.max() ?? 0
+}
+
 func runChecks() throws {
     let doctor = try Doctor.parse(["--python-backend", "/tmp/backend", "--require-backend-ready"])
     try checkEqual(doctor.pythonBackend, "/tmp/backend", "doctor python backend parses")
@@ -168,9 +179,31 @@ func runChecks() throws {
     try checkEqual(parsedWAV.samples, [100, -100], "WAV PCM parser round trip")
     let mixedWAV = try WAVMixer.mix(
         WAVPCMFile(sampleRate: 16_000, samples: [30_000, -30_000, 123]),
-        WAVPCMFile(sampleRate: 16_000, samples: [10_000, -10_000])
+        WAVPCMFile(sampleRate: 16_000, samples: [10_000, -10_000]),
+        mode: .raw
     )
     try checkEqual(mixedWAV.samples, [32_767, -32_768, 123], "WAV mixer clips and pads")
+
+    let burstyMicSamples: [Int16] = (0..<400).map { index in
+        guard index % 8 == 0 else { return 0 }
+        return (index / 8).isMultiple(of: 2) ? 60 : -60
+    }
+    let continuousSystemSamples: [Int16] = (0..<400).map { index in
+        guard index % 2 == 0 else { return 0 }
+        return (index / 2).isMultiple(of: 2) ? 100 : -100
+    }
+    let burstyRawMix = try WAVMixer.mix(
+        WAVPCMFile(sampleRate: 16_000, samples: burstyMicSamples),
+        WAVPCMFile(sampleRate: 16_000, samples: continuousSystemSamples),
+        mode: .raw
+    )
+    let burstyBalancedMix = try WAVMixer.mix(
+        WAVPCMFile(sampleRate: 16_000, samples: burstyMicSamples),
+        WAVPCMFile(sampleRate: 16_000, samples: continuousSystemSamples),
+        mode: .balanced
+    )
+    try check(rms(burstyBalancedMix.samples) > rms(burstyRawMix.samples), "balanced mixer lifts bursty meeting RMS")
+    try check(peakMagnitude(burstyBalancedMix.samples) > peakMagnitude(burstyRawMix.samples), "balanced mixer avoids unnecessary blanket attenuation")
 
     do {
         _ = try WAVPCMFile.parse(Data("not a wav".utf8))

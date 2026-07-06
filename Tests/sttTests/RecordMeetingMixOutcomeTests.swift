@@ -19,7 +19,8 @@ struct RecordMeetingMixOutcomeTests {
         let outcome = Record.resolveMeetingMixOutcome(
             micResult: RecordingResult(outputURL: micURL, durationSeconds: 0.25, fileSizeBytes: 48),
             systemResult: RecordingResult(outputURL: systemURL, durationSeconds: 0.25, fileSizeBytes: 46),
-            mixedURL: mixedURL
+            mixedURL: mixedURL,
+            mode: .raw
         )
 
         #expect(outcome.note == nil)
@@ -30,6 +31,28 @@ struct RecordMeetingMixOutcomeTests {
 
         let mixed = try WAVPCMFile.parse(Data(contentsOf: mixedURL))
         #expect(mixed.samples == [4_000, 2_000])
+    }
+
+    @Test func defaultModeIsBalancedAndDiffersFromRawSummation() throws {
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let micURL = tmpDir.appendingPathComponent("mic.wav")
+        let systemURL = tmpDir.appendingPathComponent("system.wav")
+        let mixedURL = tmpDir.appendingPathComponent("mixed.wav")
+        try WAVPCMFile(sampleRate: 8_000, samples: [1_000, 2_000]).encodedData().write(to: micURL)
+        try WAVPCMFile(sampleRate: 8_000, samples: [3_000]).encodedData().write(to: systemURL)
+
+        // No explicit `mode:` argument -- exercises the .balanced default.
+        _ = Record.resolveMeetingMixOutcome(
+            micResult: RecordingResult(outputURL: micURL, durationSeconds: 0.25, fileSizeBytes: 48),
+            systemResult: RecordingResult(outputURL: systemURL, durationSeconds: 0.25, fileSizeBytes: 46),
+            mixedURL: mixedURL
+        )
+
+        let mixed = try WAVPCMFile.parse(Data(contentsOf: mixedURL))
+        #expect(mixed.samples != [4_000, 2_000])
     }
 
     @Test func fallsBackWithNoteWhenMixingFails() throws {

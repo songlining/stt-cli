@@ -50,6 +50,21 @@ struct CLIParsingTests {
         #expect(record.mode == .meeting)
         #expect(record.separateTracks)
         #expect(record.outputDir == "session1")
+        #expect(record.mixMode == .balanced)
+    }
+
+    @Test func recordMixModeDefaultsToBalancedAndAcceptsRaw() throws {
+        let defaultRecord = try Record.parse(["--mode", "meeting"])
+        #expect(defaultRecord.mixMode == .balanced)
+
+        let rawRecord = try Record.parse(["--mode", "meeting", "--mix-mode", "raw"])
+        #expect(rawRecord.mixMode == .raw)
+    }
+
+    @Test func recordRejectsInvalidMixMode() {
+        #expect(throws: (any Error).self) {
+            try Record.parse(["--mode", "meeting", "--mix-mode", "bogus"])
+        }
     }
 
     @Test func recordRejectsInvalidMode() {
@@ -166,7 +181,8 @@ struct CLIParsingTests {
             "--model", "custom/model",
             "--max-new-tokens", "2048",
             "--python-backend", "/tmp/backend",
-            "--require-backend-ready"
+            "--require-backend-ready",
+            "--mix-mode", "raw"
         ])
         #expect(pipeline.mode == .meeting)
         #expect(pipeline.name == "Customer Call")
@@ -179,14 +195,26 @@ struct CLIParsingTests {
         #expect(pipeline.maxNewTokens == 2048)
         #expect(pipeline.pythonBackend == "/tmp/backend")
         #expect(pipeline.requireBackendReady)
+        #expect(pipeline.mixMode == .raw)
+    }
+
+    @Test func pipelineMixModeDefaultsToBalanced() throws {
+        let pipeline = try Pipeline.parse(["--mode", "meeting"])
+        #expect(pipeline.mixMode == .balanced)
     }
 
     @Test func mixParsesInputsAndOptions() throws {
-        let mix = try Mix.parse(["mic.wav", "system.wav", "--output", "mixed.wav", "--fail-if-empty"])
+        let mix = try Mix.parse(["mic.wav", "system.wav", "--output", "mixed.wav", "--fail-if-empty", "--mix-mode", "raw"])
         #expect(mix.firstAudioPath == "mic.wav")
         #expect(mix.secondAudioPath == "system.wav")
         #expect(mix.output == "mixed.wav")
         #expect(mix.failIfEmpty)
+        #expect(mix.mixMode == .raw)
+    }
+
+    @Test func mixMixModeDefaultsToBalanced() throws {
+        let mix = try Mix.parse(["mic.wav", "system.wav"])
+        #expect(mix.mixMode == .balanced)
     }
 
     @Test func mixRejectsMissingInputFileBeforeMixing() throws {

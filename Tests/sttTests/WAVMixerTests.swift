@@ -34,10 +34,86 @@ struct WAVMixerTests {
         let lhs = WAVPCMFile(sampleRate: 16_000, samples: [10_000, 30_000, -30_000, 123])
         let rhs = WAVPCMFile(sampleRate: 16_000, samples: [10_000, 10_000, -10_000])
 
-        let mixed = try WAVMixer.mix(lhs, rhs)
+        // Existing raw-summation assertion, kept intentionally on `.raw` mode
+        // since `.balanced` is now the default and would rescale these levels.
+        let mixed = try WAVMixer.mix(lhs, rhs, mode: .raw)
 
         #expect(mixed.sampleRate == 16_000)
         #expect(mixed.samples == [20_000, 32_767, -32_768, 123])
+    }
+
+    @Test func rawModeMatchesLegacyRawSummationExactly() throws {
+        // Reproduces the pre-balancing behavior byte-for-byte: raw PCM
+        // summation with only Int16 clamping, no loudness normalization.
+        let lhs = WAVPCMFile(sampleRate: 16_000, samples: [1_000, -2_000, 30_000])
+        let rhs = WAVPCMFile(sampleRate: 16_000, samples: [500, 500, 500])
+
+        let mixed = try WAVMixer.mix(lhs, rhs, mode: .raw)
+
+        #expect(mixed.samples == [1_500, -1_500, 32_767])
+    }
+
+    @Test func balancedModeLiftsQuietTrackToParityWithLoudTrack() throws {
+        // Loud track: full-scale-ish tone. Quiet track: same shape but at
+        // roughly 1/16th amplitude (about -24 dB quieter), similar to the
+        // real-world mic-vs-system imbalance this fix addresses.
+        let loudSamples: [Int16] = (0..<200).map { i in
+            Int16(clamping: Int(20_000.0 * sin(Double(i) * 0.3)))
+        }
+        let quietSamples: [Int16] = loudSamples.map { Int16(clamping: Int($0) / 16) }
+
+        let loud = WAVPCMFile(sampleRate: 16_000, samples: loudSamples)
+        let quiet = WAVPCMFile(sampleRate: 16_000, samples: quietSamples)
+
+        let rawMixed = try WAVMixer.mix(loud, quiet, mode: .raw)
+        let balancedMixed = try WAVMixer.mix(loud, quiet, mode: .balanced)
+
+        // Sanity: raw mixing is dominated by the loud track's RMS (its
+        // contribution to the raw mix should track the loud track closely).
+        let rawRMS = WAVMixer.rms(rawMixed.samples)
+        let loudRMS = WAVMixer.rms(loudSamples)
+        let quietRMS = WAVMixer.rms(quietSamples)
+        #expect(quietRMS < loudRMS * 0.2)
+        #expect(abs(rawRMS - loudRMS) < loudRMS * 0.3)
+
+        // After balancing, the two tracks should be lifted to comparable
+        // (parity) loudness before summation, so the balanced mix should be
+        // meaningfully louder than the raw mix (the quiet track no longer
+        // gets buried) while never having reduced the loud track's level.
+        let balancedRMS = WAVMixer.rms(balancedMixed.samples)
+        #expect(balancedRMS > rawRMS)
+
+        // Directly verify the gain policy: scaling the quiet track up by
+        // (loudRMS / quietRMS) should bring it to parity with the loud track.
+        let impliedGain = loudRMS / quietRMS
+        let scaledQuiet = WAVMixer.scale(quietSamples, by: impliedGain)
+        let scaledQuietRMS = WAVMixer.rms(scaledQuiet)
+        #expect(abs(scaledQuietRMS - loudRMS) < loudRMS * 0.05)
+    }
+
+    @Test func balancedModeDoesNotBlanketAttenuateBurstyMeetingAudio() throws {
+        // Regression fixture for real meeting captures where tracks have very
+        // different duty cycles: a low-duty-cycle mic plus a more continuous
+        // system track. A fixed post-sum attenuation factor can erase the RMS
+        // lift from balancing and make the mixed file sound too quiet.
+        let sampleCount = 400
+        let micSamples: [Int16] = (0..<sampleCount).map { index in
+            guard index % 8 == 0 else { return 0 }
+            return (index / 8).isMultiple(of: 2) ? 60 : -60
+        }
+        let systemSamples: [Int16] = (0..<sampleCount).map { index in
+            guard index % 2 == 0 else { return 0 }
+            return (index / 2).isMultiple(of: 2) ? 100 : -100
+        }
+
+        let mic = WAVPCMFile(sampleRate: 16_000, samples: micSamples)
+        let system = WAVPCMFile(sampleRate: 16_000, samples: systemSamples)
+
+        let rawMixed = try WAVMixer.mix(mic, system, mode: .raw)
+        let balancedMixed = try WAVMixer.mix(mic, system, mode: .balanced)
+
+        #expect(WAVMixer.rms(balancedMixed.samples) > WAVMixer.rms(rawMixed.samples))
+        #expect(peakMagnitude(balancedMixed.samples) > peakMagnitude(rawMixed.samples))
     }
 
     @Test func mixRejectsNonSixteenBitDepthConstructedDirectly() {
@@ -53,7 +129,7 @@ struct WAVMixerTests {
         let lhs = WAVPCMFile(sampleRate: 10, samples: [0, 100])
         let rhs = WAVPCMFile(sampleRate: 20, samples: [0, 0, 0, 0])
 
-        let mixed = try WAVMixer.mix(lhs, rhs)
+        let mixed = try WAVMixer.mix(lhs, rhs, mode: .raw)
 
         #expect(mixed.sampleRate == 20)
         #expect(mixed.samples == [0, 50, 100, 100])
@@ -63,7 +139,7 @@ struct WAVMixerTests {
         let lhs = WAVPCMFile(sampleRate: 44_100, samples: Array(repeating: Int16(1_000), count: 441))
         let rhs = WAVPCMFile(sampleRate: 48_000, samples: Array(repeating: Int16(1_000), count: 480))
 
-        let mixed = try WAVMixer.mix(lhs, rhs)
+        let mixed = try WAVMixer.mix(lhs, rhs, mode: .raw)
 
         #expect(mixed.sampleRate == 48_000)
         #expect(mixed.samples.count == 480)
@@ -173,7 +249,7 @@ struct WAVMixerTests {
         try WAVPCMFile(sampleRate: 8_000, samples: [1_000, 2_000]).encodedData().write(to: lhsURL)
         try WAVPCMFile(sampleRate: 8_000, samples: [3_000]).encodedData().write(to: rhsURL)
 
-        let result = try WAVMixer.mixFiles(lhsURL, rhsURL, outputURL: outURL)
+        let result = try WAVMixer.mixFiles(lhsURL, rhsURL, outputURL: outURL, mode: .raw)
         let parsed = try WAVPCMFile.parse(Data(contentsOf: outURL))
 
         #expect(result.outputURL == outURL)
@@ -193,7 +269,7 @@ struct WAVMixerTests {
         try WAVPCMFile(sampleRate: 44_100, samples: Array(repeating: Int16(1_000), count: 441)).encodedData().write(to: lhsURL)
         try WAVPCMFile(sampleRate: 48_000, samples: Array(repeating: Int16(1_000), count: 480)).encodedData().write(to: rhsURL)
 
-        let result = try WAVMixer.mixFiles(lhsURL, rhsURL, outputURL: outURL)
+        let result = try WAVMixer.mixFiles(lhsURL, rhsURL, outputURL: outURL, mode: .raw)
         let parsed = try WAVPCMFile.parse(Data(contentsOf: outURL))
 
         #expect(result.outputURL == outURL)
@@ -245,6 +321,10 @@ struct WAVMixerTests {
         try WAVPCMFile(sampleRate: 10, samples: Array(repeating: 1, count: 10)).encodedData().write(to: rhsURL)
 
         #expect(WAVMixer.driftWarning(lhsURL: lhsURL, rhsURL: rhsURL) == nil)
+    }
+
+    private func peakMagnitude(_ samples: [Int16]) -> Int {
+        samples.map { abs(Int($0)) }.max() ?? 0
     }
 
     private func appendInt16LE(_ value: Int16, to data: inout Data) {

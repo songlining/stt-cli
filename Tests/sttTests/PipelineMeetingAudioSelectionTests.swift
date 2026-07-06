@@ -16,7 +16,7 @@ struct PipelineMeetingAudioSelectionTests {
         try WAVPCMFile(sampleRate: 8_000, samples: [1_000, 2_000]).encodedData().write(to: micURL)
         try WAVPCMFile(sampleRate: 8_000, samples: [3_000]).encodedData().write(to: systemURL)
 
-        let selection = Pipeline.resolveMeetingAudioSource(micURL: micURL, systemURL: systemURL, mixedURL: mixedURL)
+        let selection = Pipeline.resolveMeetingAudioSource(micURL: micURL, systemURL: systemURL, mixedURL: mixedURL, mode: .raw)
 
         #expect(selection.audioToTranscribeURL == mixedURL)
         #expect(selection.outputURLs == [micURL, systemURL, mixedURL])
@@ -24,6 +24,9 @@ struct PipelineMeetingAudioSelectionTests {
         #expect(selection.driftNote == nil)
         #expect(FileManager.default.fileExists(atPath: mixedURL.path))
 
+        // Explicitly exercises `.raw` mode so this assertion continues to
+        // reflect exact PCM summation, independent of the new `.balanced`
+        // default.
         let mixed = try WAVPCMFile.parse(Data(contentsOf: mixedURL))
         #expect(mixed.samples == [4_000, 2_000])
     }
