@@ -64,6 +64,48 @@ struct PythonTranscriberTests {
         #expect(resolved != runtimeRoot.appendingPathComponent(".venv/bin/python").path)
     }
 
+    @Test func locatePythonUsesPreferredBackendVirtualenvWhenEnvironmentIsUnset() throws {
+        let backendRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let venvBin = backendRoot.appendingPathComponent(".venv/bin")
+        try FileManager.default.createDirectory(at: venvBin, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: backendRoot) }
+
+        let pythonPath = venvBin.appendingPathComponent("python")
+        try "#!/bin/sh\n".write(to: pythonPath, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: pythonPath.path)
+
+        let resolved = PythonTranscriber.locatePython3(environment: [:], preferredRuntimeRoot: backendRoot)
+
+        #expect(resolved == pythonPath.path)
+    }
+
+    @Test func locatePythonEnvironmentRuntimeOverridesPreferredBackendVirtualenv() throws {
+        let envRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let backendRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let envBin = envRoot.appendingPathComponent(".venv/bin")
+        let backendBin = backendRoot.appendingPathComponent(".venv/bin")
+        try FileManager.default.createDirectory(at: envBin, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: backendBin, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: envRoot)
+            try? FileManager.default.removeItem(at: backendRoot)
+        }
+
+        let envPython = envBin.appendingPathComponent("python")
+        let backendPython = backendBin.appendingPathComponent("python")
+        try "#!/bin/sh\n".write(to: envPython, atomically: true, encoding: .utf8)
+        try "#!/bin/sh\n".write(to: backendPython, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: envPython.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: backendPython.path)
+
+        let resolved = PythonTranscriber.locatePython3(
+            environment: ["STT_VIBEVOICE_RUNTIME": envRoot.path],
+            preferredRuntimeRoot: backendRoot
+        )
+
+        #expect(resolved == envPython.path)
+    }
+
     @Test func parsesJSONSurroundedByLogLines() throws {
         let stdout = """
         [backend] loading model

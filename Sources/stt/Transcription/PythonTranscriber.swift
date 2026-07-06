@@ -68,25 +68,34 @@ public enum PythonTranscriberError: Error, LocalizedError {
 /// backend's JSON result.
 public enum PythonTranscriber {
 
-    /// Locates a usable Python interpreter, preferring the configured
-    /// STT_VIBEVOICE_RUNTIME virtualenv before falling back to PATH.
-    public static func locatePython3(environment: [String: String] = ProcessInfo.processInfo.environment) -> String? {
-        if let runtimeRoot = environment["STT_VIBEVOICE_RUNTIME"], !runtimeRoot.isEmpty {
-            let venvPython = URL(fileURLWithPath: runtimeRoot)
-                .appendingPathComponent(".venv/bin/python")
-                .path
-            if FileManager.default.isExecutableFile(atPath: venvPython) {
-                return venvPython
-            }
+    /// Locates a usable Python interpreter, preferring an explicit
+    /// STT_VIBEVOICE_RUNTIME virtualenv, then the selected Python backend's
+    /// local `.venv`, before falling back to PATH.
+    public static func locatePython3(environment: [String: String] = ProcessInfo.processInfo.environment,
+                                     preferredRuntimeRoot: URL? = nil) -> String? {
+        if let runtimeRoot = environment["STT_VIBEVOICE_RUNTIME"], !runtimeRoot.isEmpty,
+           let python = virtualenvPython(in: URL(fileURLWithPath: runtimeRoot)) {
+            return python
+        }
+        if let preferredRuntimeRoot, let python = virtualenvPython(in: preferredRuntimeRoot) {
+            return python
         }
         return ProcessRunner.resolvePath("python3") ?? ProcessRunner.resolvePath("python")
+    }
+
+    private static func virtualenvPython(in runtimeRoot: URL) -> String? {
+        let venvPython = runtimeRoot.appendingPathComponent(".venv/bin/python").path
+        if FileManager.default.isExecutableFile(atPath: venvPython) {
+            return venvPython
+        }
+        return nil
     }
 
     /// Runs the Python backend's environment status report. This is safe for
     /// `doctor`: the Python module never imports MLX directly and exits zero
     /// even when the local transcription dependencies are missing.
     public static func statusReport(workingDirectory: URL?, timeout: TimeInterval = 5, requireReady: Bool = false) throws -> ProcessResult {
-        guard let python = locatePython3() else {
+        guard let python = locatePython3(preferredRuntimeRoot: workingDirectory) else {
             throw PythonTranscriberError.python3NotFound
         }
         var arguments = ["-m", "stt_vibevoice.status"]
@@ -123,7 +132,7 @@ public enum PythonTranscriber {
                                    timeout: TimeInterval? = nil,
                                    modelPath: String? = nil,
                                    maxNewTokens: Int? = nil) throws -> TranscriptionResult {
-        guard let python = locatePython3() else {
+        guard let python = locatePython3(preferredRuntimeRoot: workingDirectory) else {
             throw PythonTranscriberError.python3NotFound
         }
 
