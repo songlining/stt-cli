@@ -36,6 +36,21 @@ public enum Paths {
         appSupportDirectory(fileManager: fileManager, environment: environment).appendingPathComponent("runs", isDirectory: true)
     }
 
+    /// Directory used to store speaker enrollment profiles and voice
+    /// samples. Resolution order:
+    /// 1. `config.speakerProfilesDir`, if set (explicit user override).
+    /// 2. Default app-support path, `<appSupportDirectory>/speakers`, which
+    ///    is itself scoped by `STT_HOME` when that environment variable is
+    ///    set.
+    public static func speakerProfilesDirectory(config: STTConfig,
+                                                 fileManager: FileManager = .default,
+                                                 environment: [String: String] = ProcessInfo.processInfo.environment) -> URL {
+        if let override = config.speakerProfilesDir, !override.isEmpty {
+            return URL(fileURLWithPath: override, isDirectory: true)
+        }
+        return appSupportDirectory(fileManager: fileManager, environment: environment).appendingPathComponent("speakers", isDirectory: true)
+    }
+
     /// Directory for a specific run, identified by a timestamp-based token.
     public static func runDirectory(runID: String,
                                      fileManager: FileManager = .default,
