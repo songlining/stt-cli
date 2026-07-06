@@ -280,16 +280,18 @@ private extension Data {
     }
 }
 
-/// Owns the first safe native CoreAudio tap lifecycle step:
+/// Owns the native CoreAudio process-tap lifecycle:
 ///
 /// 1. create a process tap;
 /// 2. create a private aggregate device containing that tap;
-/// 3. start/stop the aggregate device;
-/// 4. destroy resources in reverse order.
+/// 3. (when an `audioBridge` is provided) create an IOProc that streams tap
+///    buffers into the bridge's WAV writer;
+/// 4. start/stop the aggregate device;
+/// 5. destroy resources in reverse order.
 ///
-/// This deliberately does not create an IOProc or stream audio into `record
-/// --mode system` yet. It is an internal building block for the next Milestone 2
-/// step and is unused by default outside opt-in diagnostics/tests.
+/// When constructed with an `audioBridge`, this streams real system audio into
+/// `record --mode system`/`--mode meeting`. Without a bridge it performs only
+/// the tap/aggregate create+destroy lifecycle, used by opt-in diagnostics/tests.
 final class NativeTapLifecycle {
     private let operations: NativeTapCoreAudioOperations
     private let availabilityProvider: () -> NativeTapAvailability

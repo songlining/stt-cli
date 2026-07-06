@@ -174,24 +174,20 @@ public enum SystemAudioRecorderError: Error, LocalizedError {
 ///   treating a virtual/aggregate CoreAudio input device (BlackHole,
 ///   "Aggregate Device", a Multi-Output+BlackHole setup, etc.) as a normal
 ///   microphone input via `MicRecorder`. This is fully functional today and
-///   is what `stt record --mode system` uses unless a native tap is proven
-///   available and working.
+///   is used automatically as the fallback when the native tap is unavailable
+///   or fails.
 ///
-/// - STUBBED / BEST-EFFORT: `.coreAudioTap` — real system-output capture via
-///   the macOS 14.4+ Core Audio "process tap" APIs
+/// - IMPLEMENTED: `.coreAudioTap` — real system-output capture via the
+///   macOS 14.4+ Core Audio "process tap" APIs
 ///   (`AudioHardwareCreateProcessTap`, `AudioHardwareCreateAggregateDevice`
-///   with a tap description, `kAudioSubTapUIDKey`, etc.). These APIs exist as
-///   C functions in CoreAudio/AudioToolbox but (as of this writing) largely
-///   lack public Swift-friendly headers/signatures in the standard macOS SDK
-///   shipped with swift-argument-parser-era toolchains, and require careful
-///   CFDictionary-based aggregate-device descriptions plus IOProc callback
-///   wiring that is materially riskier to get right than the fallback path.
-///   `probeNativeTapAvailability()` below performs a conservative capability
-///   check (macOS version + presence of the runtime symbols) and reports
-///   whether the tap path *could* be attempted, but `startNativeTap()`
-///   currently always fails fast with `.tapUnavailable`, deferring the full
-///   implementation to a follow-up iteration. Every caller must treat this
-///   as a soft failure and fall back to `.namedInputDeviceFallback`.
+///   with a tap description, `kAudioSubTapUIDKey`, etc.), implemented in
+///   `NativeTapLifecycle` + `NativeTapWAVBridge`. `startNativeTap()` below
+///   creates a private process tap + aggregate device, wires an IOProc that
+///   streams Float32 tap buffers into a 16-bit PCM WAV, and is the PRIMARY
+///   path used by `stt record --mode system`/`--mode meeting`. It has been
+///   verified to capture real, non-silent system audio on Apple Silicon with
+///   macOS 14.4+. If the tap is unavailable (unsupported OS/SDK) or fails at
+///   runtime, callers fall back to `.namedInputDeviceFallback`.
 public final class SystemAudioRecorder {
     private let micRecorder = MicRecorder()
     private var nativeLifecycle: NativeTapLifecycle?

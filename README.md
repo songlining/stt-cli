@@ -9,7 +9,8 @@ Implemented:
 - Swift CLI commands: `doctor`, `devices`, `record`, `transcribe`, `pipeline`, `permissions`.
 - Finite recordings via `--duration` for safe smoke tests.
 - Microphone recording to WAV.
-- Named input-device fallback for system audio, e.g. BlackHole/Aggregate Device.
+- Native CoreAudio process-tap system-output capture (macOS 14.4+ `AudioHardwareCreateProcessTap`), used as the primary `--mode system`/`--mode meeting` path and verified to capture real, non-silent system audio on Apple Silicon.
+- Named input-device fallback for system audio (e.g. BlackHole/Aggregate Device), used automatically when the native tap is unavailable or fails.
 - `.app` bundle wrapper for better macOS TCC attribution.
 - Ad-hoc local signing with microphone entitlement.
 - Python backend diagnostics in `stt doctor`.
@@ -20,8 +21,7 @@ Implemented:
 
 Still incomplete:
 
-- Native CoreAudio process-tap system-output capture is probed but not wired.
-- BlackHole fallback requires real routed audio to produce useful system-audio content.
+- BlackHole/named-device fallback requires real routed audio to produce useful system-audio content (it is only used when the native tap is unavailable or fails).
 - Fresh TCC prompt attribution must be manually confirmed after resetting permissions.
 - Distribution signing/notarization is not implemented.
 
