@@ -239,6 +239,68 @@ Transcribe an existing single audio file with explicit backend settings:
   --require-backend-ready
 ```
 
+## Speaker identification (speechbrain provider)
+
+`stt speaker enroll`, `stt identify`, and `--identify-speakers` use a pluggable embedding provider (see `SPEAKER_IDENTIFICATION_PLAN.md`). Two providers exist:
+
+- `mfcc-test`: stdlib-only, deterministic, but not real speaker recognition. Used for tests/smoke checks only -- never present it to users as accurate identity matching.
+- `speechbrain`: real speaker embeddings using `speechbrain/spkrec-ecapa-voxceleb` (ECAPA-TDNN trained on VoxCeleb). This is the provider to use for actual speaker identification.
+
+### Requirements
+
+The `speechbrain` provider needs the optional `speechbrain` and `torchaudio` packages (which pull in PyTorch). As of this writing, PyTorch does not reliably support every CPython release on Apple Silicon, so:
+
+- Use a **Python 3.11 or 3.12** interpreter for the backend venv, not the newest CPython (e.g. not the default Homebrew `python3` if it is 3.13/3.14). Check available interpreters with `command -v python3.12 python3.11 python3`.
+- CPU (and, best-effort, Apple Silicon MPS) inference is used; no CUDA/GPU passthrough is needed on macOS.
+
+### Install
+
+```bash
+./scripts/bootstrap-python-backend.sh --python python3.11 --speechbrain --check
+```
+
+Or for a non-default runtime:
+
+```bash
+STT_VIBEVOICE_RUNTIME=/opt/stt-runtime ./scripts/bootstrap-python-backend.sh --python python3.11 --speechbrain
+export STT_VIBEVOICE_RUNTIME=/opt/stt-runtime
+```
+
+Equivalent manual install:
+
+```bash
+python3.11 -m venv python/.venv
+python/.venv/bin/pip install --upgrade pip setuptools wheel
+python/.venv/bin/pip install -e 'python[speechbrain]'
+```
+
+### Model download and cache
+
+The first `speechbrain` extraction downloads `speechbrain/spkrec-ecapa-voxceleb` from Hugging Face and caches it locally under `~/.cache/stt-cli/speechbrain/<model-slug>` (override with `STT_SPEECHBRAIN_CACHE`). Subsequent extractions reuse the cached model and work offline. Ensure network access is available for the first run, or pre-populate the cache directory on another machine and copy it over.
+
+### Readiness check
+
+`python3 -m stt_vibevoice.status` reports both provider availability and a Python-version hint:
+
+```bash
+PYTHONPATH=./python python/.venv/bin/python -m stt_vibevoice.status
+# speaker-id provider mfcc-test: available
+# speaker-id provider speechbrain: not installed
+# speaker-id provider speechbrain hint: current interpreter is Python 3.14.6; use Python 3.11 or 3.12 ...
+```
+
+Speaker identification is opt-in and does not affect the overall `ready` status used by `--require-backend-ready` for transcription; that flag only covers the MLX/VibeVoice ASR backend.
+
+### Usage
+
+```bash
+stt speaker enroll "Larry Song" --audio /path/to/larry.wav --provider speechbrain
+stt identify /tmp/clip.wav --provider speechbrain --json /tmp/clip-id.json
+stt transcribe meeting.wav --identify-speakers --speaker-provider speechbrain
+```
+
+If `speechbrain`/`torchaudio` are missing, or the current interpreter can't import them, these commands fail with an actionable `SpeakerIdError` message rather than a raw stack trace.
+
 ## Python backend readiness
 
 `stt doctor` prints Python backend readiness and an actionable setup hint when dependencies are missing. Add `--require-backend-ready` when you want `doctor` to exit non-zero unless the transcription backend is fully ready. The backend is ready only when Apple Silicon, ffmpeg/ffprobe, and required modules are available. The Python status module also supports machine-readable checks:

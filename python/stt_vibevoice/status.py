@@ -128,13 +128,24 @@ def _check_speaker_identification() -> Dict[str, Any]:
     both ``speechbrain`` and ``torchaudio`` are importable. This section is
     purely informational and never affects the overall ``ready`` flag,
     since speaker identification is an opt-in feature.
+
+    PyTorch (and therefore ``speechbrain``/``torchaudio``) does not reliably
+    support every CPython release on Apple Silicon; Python 3.11 or 3.12 is
+    the recommended interpreter for the speechbrain provider as of this
+    writing. ``python_version_supported`` is a best-effort hint, not a hard
+    gate: even on an unsupported interpreter we still just report whatever
+    ``speechbrain``/``torchaudio`` import checks actually find.
     """
     speechbrain_available = _module_importable("speechbrain") and _module_importable("torchaudio")
+    version_info = sys.version_info
+    python_version_supported = (version_info.major, version_info.minor) in {(3, 11), (3, 12)}
     return {
         "providers": {
             "mfcc-test": True,
             "speechbrain": speechbrain_available,
-        }
+        },
+        "python_version": platform.python_version(),
+        "python_version_recommended_for_speechbrain": python_version_supported,
     }
 
 
@@ -266,6 +277,22 @@ def format_report(report: Dict[str, Any]) -> str:
     providers = speaker_id.get("providers", {})
     for name, available in providers.items():
         lines.append(f"speaker-id provider {name}: {'available' if available else 'not installed'}")
+    if providers.get("speechbrain") is False:
+        py_version = speaker_id.get("python_version", "unknown")
+        recommended = speaker_id.get("python_version_recommended_for_speechbrain")
+        if recommended is False:
+            lines.append(
+                f"speaker-id provider speechbrain hint: current interpreter is Python "
+                f"{py_version}; use Python 3.11 or 3.12 (e.g. "
+                "./scripts/bootstrap-python-backend.sh --python python3.11 --speechbrain), "
+                "then install with `pip install speechbrain torchaudio`."
+            )
+        else:
+            lines.append(
+                "speaker-id provider speechbrain hint: install with "
+                "./scripts/bootstrap-python-backend.sh --speechbrain (or `pip install "
+                "speechbrain torchaudio`)."
+            )
 
     lines.append("overall ready: {}".format("yes" if report.get("ready") else "no"))
     if not report.get("ready"):

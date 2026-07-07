@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 import wave
+from pathlib import Path
 
 import pytest
 
@@ -60,6 +63,146 @@ class TestMfccTestProvider:
         _write_wav(wav_path, _tone(1.0))
         with pytest.raises(speaker_id.SpeakerIdError):
             speaker_id.embed_audio_file(wav_path, "not-a-real-provider")
+
+
+def _install_fake_speechbrain(monkeypatch, encode_batch=None, from_hparams=None):
+    """Installs fake ``soundfile``/``torch``/``speechbrain`` modules into sys.modules.
+
+    This exercises the real ``_speechbrain_embed_file`` integration code
+    (model loading call, soundfile.read call, tensor -> list conversion)
+    without requiring the actual (heavy, Python 3.11/3.12-only) speechbrain
+    or torch packages to be installed.
+    """
+    import numpy as np
+
+    class FakeTensor:
+        def __init__(self, values):
+            self._values = values
+
+        def squeeze(self):
+            return self
+
+        def tolist(self):
+            return self._values
+
+    class FakeClassifier:
+        @classmethod
+        def from_hparams(cls, source=None, savedir=None, run_opts=None):
+            if from_hparams is not None:
+                from_hparams(source=source, savedir=savedir, run_opts=run_opts)
+            return cls()
+
+        def encode_batch(self, signal):
+            values = encode_batch(signal) if encode_batch is not None else [0.1, 0.2, 0.3]
+            return FakeTensor(values)
+
+    class FakeTorchTensor:
+        def __init__(self, data):
+            self._data = data
+            self.ndim = getattr(data, "ndim", 1)
+
+        def unsqueeze(self, dim):
+            self.ndim = 2
+            return self
+
+        def float(self):
+            return self
+
+    class FakeTorch:
+        Tensor = FakeTorchTensor
+
+        @staticmethod
+        def from_numpy(data):
+            return FakeTorchTensor(data)
+
+    fake_soundfile = types.ModuleType("soundfile")
+    fake_soundfile.read = lambda path: (np.array([0.0, 0.1, -0.1, 0.2], dtype=np.float64), 16000)
+
+    fake_speaker_module = types.ModuleType("speechbrain.inference.speaker")
+    fake_speaker_module.EncoderClassifier = FakeClassifier
+
+    fake_inference_module = types.ModuleType("speechbrain.inference")
+    fake_inference_module.speaker = fake_speaker_module
+
+    fake_speechbrain_module = types.ModuleType("speechbrain")
+    fake_speechbrain_module.inference = fake_inference_module
+
+    monkeypatch.setitem(sys.modules, "soundfile", fake_soundfile)
+    # Force the device-selection probe to fall back to CPU deterministically,
+    # regardless of whether a real torch install with MPS support happens to
+    # be present in the environment running these tests.
+    monkeypatch.setitem(sys.modules, "torch", FakeTorch)
+    monkeypatch.setitem(sys.modules, "speechbrain", fake_speechbrain_module)
+    monkeypatch.setitem(sys.modules, "speechbrain.inference", fake_inference_module)
+    monkeypatch.setitem(sys.modules, "speechbrain.inference.speaker", fake_speaker_module)
+
+    return fake_soundfile, fake_speaker_module
+
+
+class TestSpeechbrainProvider:
+    """Exercises the speechbrain provider without requiring the real, heavy
+    speechbrain/torchaudio/torch dependency stack to be installed."""
+
+    def test_embeds_using_mocked_speechbrain_and_soundfile(self, tmp_path, monkeypatch):
+        wav_path = tmp_path / "a.wav"
+        _write_wav(wav_path, _tone(1.0))
+
+        calls = {}
+
+        def from_hparams(source, savedir, run_opts):
+            calls["source"] = source
+            calls["savedir"] = savedir
+            calls["run_opts"] = run_opts
+
+        _install_fake_speechbrain(
+            monkeypatch,
+            encode_batch=lambda signal: [0.4, 0.5, 0.6],
+            from_hparams=from_hparams,
+        )
+
+        embedding, model_id = speaker_id.embed_audio_file(wav_path, "speechbrain")
+
+        assert embedding == [0.4, 0.5, 0.6]
+        assert model_id == "speechbrain/spkrec-ecapa-voxceleb"
+        assert calls["source"] == "speechbrain/spkrec-ecapa-voxceleb"
+        assert calls["savedir"].endswith("speechbrain__spkrec-ecapa-voxceleb")
+        assert calls["run_opts"] == {"device": "cpu"}
+
+    def test_cache_dir_respects_env_override(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("STT_SPEECHBRAIN_CACHE", str(tmp_path / "custom-cache"))
+        cache_dir = speaker_id._speechbrain_cache_dir("speechbrain/spkrec-ecapa-voxceleb")
+        assert cache_dir == tmp_path / "custom-cache" / "speechbrain__spkrec-ecapa-voxceleb"
+
+    def test_missing_dependencies_raise_actionable_speaker_id_error(self, tmp_path, monkeypatch):
+        wav_path = tmp_path / "a.wav"
+        _write_wav(wav_path, _tone(1.0))
+
+        # sys.modules[name] = None forces Python's import machinery to raise
+        # ImportError for that module, regardless of whether it is actually
+        # installed in this environment.
+        monkeypatch.setitem(sys.modules, "speechbrain", None)
+
+        with pytest.raises(speaker_id.SpeakerIdError) as excinfo:
+            speaker_id.embed_audio_file(wav_path, "speechbrain")
+
+        message = str(excinfo.value)
+        assert "speechbrain" in message
+        assert "torchaudio" in message
+        assert "3.11" in message or "3.12" in message
+
+    def test_model_loading_failure_raises_actionable_speaker_id_error(self, tmp_path, monkeypatch):
+        wav_path = tmp_path / "a.wav"
+        _write_wav(wav_path, _tone(1.0))
+
+        def from_hparams(source, savedir, run_opts):
+            raise RuntimeError("simulated network failure while downloading model")
+
+        _install_fake_speechbrain(monkeypatch, from_hparams=from_hparams)
+
+        with pytest.raises(speaker_id.SpeakerIdError) as excinfo:
+            speaker_id.embed_audio_file(wav_path, "speechbrain")
+
+        assert "failed to extract an embedding" in str(excinfo.value)
 
 
 class TestCosineSimilarity:

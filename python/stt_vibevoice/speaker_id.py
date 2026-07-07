@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -88,21 +89,86 @@ def _speechbrain_model_id() -> str:
     return "speechbrain/spkrec-ecapa-voxceleb"
 
 
+def _speechbrain_cache_dir(model_id: str) -> Path:
+    """Stable local cache dir for a downloaded speechbrain model.
+
+    Defaults to ``~/.cache/stt-cli/speechbrain/<model-slug>`` so repeated
+    extractions reuse the already-downloaded model instead of speechbrain's
+    default behavior of writing ``./pretrained_models/...`` relative to the
+    current working directory. Override with ``STT_SPEECHBRAIN_CACHE``.
+    """
+    cache_root = os.environ.get("STT_SPEECHBRAIN_CACHE", "").strip()
+    base = Path(cache_root).expanduser() if cache_root else Path.home() / ".cache" / "stt-cli" / "speechbrain"
+    slug = model_id.replace("/", "__")
+    return base / slug
+
+
+def _speechbrain_run_opts() -> Dict[str, str]:
+    """Device selection for SpeechBrain inference.
+
+    Always returns CPU. SpeechBrain 1.1's EncoderClassifier is not fully
+    MPS-compatible (raises 'object has no attribute device_type') on Apple
+    Silicon. CPU is correct and fast enough for short enrollment/ID clips.
+    Override is possible via the STT_SPEECHBRAIN_DEVICE env var if a future
+    SpeechBrain release adds reliable MPS support.
+    """
+    import os
+
+    return {"device": os.environ.get("STT_SPEECHBRAIN_DEVICE", "cpu")}
+
+
+def _load_audio_tensor(audio_path: Path):
+    """Load a WAV file as a (1, samples) float32 torch tensor.
+
+    Uses soundfile (bundled with speechbrain) instead of torchaudio.load,
+    because torchaudio >= 2.11 requires the optional torchcodec package.
+    Falls back to torchaudio if soundfile is unavailable.
+    """
+    import torch  # type: ignore
+    try:
+        import soundfile as sf  # type: ignore
+        data, _sr = sf.read(str(audio_path))
+        signal = torch.from_numpy(data).float()
+        if signal.ndim == 1:
+            signal = signal.unsqueeze(0)
+        return signal
+    except ImportError:
+        import torchaudio  # type: ignore
+        signal, _fs = torchaudio.load(str(audio_path))
+        return signal
+
+
 def _speechbrain_embed_file(audio_path: Path) -> List[float]:
     try:
-        import torchaudio  # type: ignore
         from speechbrain.inference.speaker import EncoderClassifier  # type: ignore
-    except Exception as error:  # pragma: no cover - exercised only with optional deps installed
+    except Exception as error:
         raise SpeakerIdError(
             "The 'speechbrain' provider requires the optional 'speechbrain' and "
-            "'torchaudio' packages. Install them (e.g. `pip install speechbrain "
+            "'torchaudio' packages, plus a Python 3.11 or 3.12 runtime (PyTorch "
+            "does not yet support newer CPython releases on Apple Silicon as of "
+            "this writing). Install them (e.g. `./scripts/bootstrap-python-backend.sh "
+            "--python python3.11 --speechbrain --check`, or `pip install speechbrain "
             "torchaudio`) or use --provider mfcc-test for testing."
         ) from error
 
-    classifier = EncoderClassifier.from_hparams(source=_speechbrain_model_id())
-    signal, _fs = torchaudio.load(str(audio_path))
-    embedding = classifier.encode_batch(signal)
-    return embedding.squeeze().tolist()
+    model_id = _speechbrain_model_id()
+    try:
+        classifier = EncoderClassifier.from_hparams(
+            source=model_id,
+            savedir=str(_speechbrain_cache_dir(model_id)),
+            run_opts=_speechbrain_run_opts(),
+        )
+        signal = _load_audio_tensor(audio_path)
+        embedding = classifier.encode_batch(signal)
+        return embedding.squeeze().tolist()
+    except SpeakerIdError:
+        raise
+    except Exception as error:
+        raise SpeakerIdError(
+            f"speechbrain provider failed to extract an embedding from '{audio_path}': {error}. "
+            "This is often a missing/corrupt model download (check network access and "
+            f"{_speechbrain_cache_dir(model_id)}) or an unsupported audio file."
+        ) from error
 
 
 _PROVIDERS: Dict[str, Dict[str, Any]] = {
