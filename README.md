@@ -6,7 +6,7 @@ Native macOS speech-to-text CLI prototype in Swift, with a Python/MLX VibeVoice 
 
 Implemented:
 
-- Swift CLI commands: `doctor`, `devices`, `record`, `transcribe`, `pipeline`, `permissions`.
+- Swift CLI commands: `doctor`, `devices`, `record`, `transcribe`, `transcribe-meeting`, `pipeline`, `permissions`.
 - Finite recordings via `--duration` for safe smoke tests.
 - Microphone recording to WAV.
 - Native CoreAudio process-tap system-output capture (macOS 14.4+ `AudioHardwareCreateProcessTap`), used as the primary `--mode system`/`--mode meeting` path and verified to capture real, non-silent system audio on Apple Silicon.
@@ -16,7 +16,7 @@ Implemented:
 - Python backend diagnostics in `stt doctor`.
 - Pipeline metadata (`metadata.json`) written under each run directory.
 - Best-effort WAV mix-down for compatible meeting-mode `mic.wav` + `system.wav` tracks.
-- Meeting pipelines transcribe `mixed.wav` when mix-down succeeds and fall back to `mic.wav` with a metadata note when it does not.
+- Meeting pipelines default to separate mic/system transcription and timestamp-based transcript merging so overlapping microphone speech is not masked by system audio. `mixed.wav` remains available for playback/reference, and `--meeting-transcription mixed` preserves the legacy single-pass mixed-audio behavior.
 - Bounded validation script: `scripts/validate.sh`.
 
 Still incomplete:
@@ -173,7 +173,7 @@ Record meeting tracks and attempt a post-capture `mixed.wav` when both tracks ar
 ./dist/stt.app/Contents/MacOS/stt record --mode meeting --input-device "BlackHole 2ch" --duration 5 --output-dir /tmp/meeting
 ```
 
-Successful mix-down emits a non-fatal drift note when mic and system track durations differ by more than 0.25s. Use `--separate-tracks` to keep only `mic.wav` and `system.wav` without attempting mix-down when downstream diarization or manual alignment needs the original tracks.
+Successful mix-down emits a non-fatal drift note when mic and system track durations differ by more than 0.25s. Use `--separate-tracks` to keep only `mic.wav` and `system.wav` without attempting mix-down when downstream diarization or manual alignment needs the original tracks. For transcription correctness, prefer the default separate-track transcription path rather than feeding `mixed.wav` into one ASR pass.
 
 Mix two existing compatible WAV tracks manually:
 
@@ -205,11 +205,27 @@ Fail before recording if the transcription backend is not ready:
   --require-backend-ready
 ```
 
-For meeting pipelines, the CLI records `mic.wav` and `system.wav`, attempts to create `mixed.wav`, and transcribes the mixed track when possible. If mix-down fails, it transcribes `mic.wav` and records the fallback note in `metadata.json`. If mix-down succeeds but mic/system durations differ by more than 0.25s, the non-fatal drift note is also written to metadata. Pipeline metadata includes `transcribedAudioPath` so downstream tooling can see exactly which audio file was sent to the backend.
+For meeting pipelines, the CLI records `mic.wav` and `system.wav`, attempts to create `mixed.wav`, then by default transcribes `mic.wav` and `system.wav` independently and merges their timestamped transcript segments into the final transcript. This avoids the common failure mode where a single ASR pass over `mixed.wav` follows the louder/clearer system-audio speaker and drops overlapping microphone speech. If mix-down fails, the original tracks are still transcribed separately. If mix-down succeeds but mic/system durations differ by more than 0.25s, the non-fatal drift note is written to metadata. Pipeline metadata includes `transcribedAudioPath` so downstream tooling can see which audio files were sent to the backend. Use `--meeting-transcription mixed` only when you explicitly want the legacy single-pass `mixed.wav` transcription behavior.
 
 If MLX/mlx-audio is not installed, the pipeline records audio and writes failure details into `metadata.json`.
 
-Transcribe an existing audio file with explicit backend settings:
+Transcribe existing meeting tracks with separate mic/system ASR passes and a merged timestamped transcript:
+
+```bash
+./dist/stt.app/Contents/MacOS/stt transcribe-meeting /tmp/meeting/mic.wav /tmp/meeting/system.wav \
+  --output /tmp/meeting/transcript.md \
+  --json /tmp/meeting/transcript.json \
+  --device gpu \
+  --timeout 300 \
+  --model mlx-community/VibeVoice-ASR-8bit \
+  --max-new-tokens 4096 \
+  --python-backend ./python \
+  --require-backend-ready
+```
+
+This also writes per-source artifacts next to the merged output, such as `transcript.mic.txt`, `transcript.mic.json`, `transcript.system.txt`, and `transcript.system.json`.
+
+Transcribe an existing single audio file with explicit backend settings:
 
 ```bash
 ./dist/stt.app/Contents/MacOS/stt transcribe /tmp/mic.wav \

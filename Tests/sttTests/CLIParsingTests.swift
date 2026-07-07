@@ -169,6 +169,31 @@ struct CLIParsingTests {
         #expect(transcribe.device == .auto)
     }
 
+    @Test func transcribeMeetingParsesSourcesAndOptions() throws {
+        let transcribe = try TranscribeMeeting.parse([
+            "mic.wav",
+            "system.wav",
+            "--output", "out.md",
+            "--json", "out.json",
+            "--device", "gpu",
+            "--timeout", "30",
+            "--model", "custom/model",
+            "--max-new-tokens", "2048",
+            "--python-backend", "/tmp/backend",
+            "--require-backend-ready"
+        ])
+        #expect(transcribe.micAudioPath == "mic.wav")
+        #expect(transcribe.systemAudioPath == "system.wav")
+        #expect(transcribe.output == "out.md")
+        #expect(transcribe.json == "out.json")
+        #expect(transcribe.device == .gpu)
+        #expect(transcribe.timeout == 30)
+        #expect(transcribe.model == "custom/model")
+        #expect(transcribe.maxNewTokens == 2048)
+        #expect(transcribe.pythonBackend == "/tmp/backend")
+        #expect(transcribe.requireBackendReady)
+    }
+
     @Test func pipelineParsesModeAndName() throws {
         let pipeline = try Pipeline.parse([
             "--mode", "meeting",
@@ -182,7 +207,8 @@ struct CLIParsingTests {
             "--max-new-tokens", "2048",
             "--python-backend", "/tmp/backend",
             "--require-backend-ready",
-            "--mix-mode", "raw"
+            "--mix-mode", "raw",
+            "--meeting-transcription", "mixed"
         ])
         #expect(pipeline.mode == .meeting)
         #expect(pipeline.name == "Customer Call")
@@ -196,11 +222,17 @@ struct CLIParsingTests {
         #expect(pipeline.pythonBackend == "/tmp/backend")
         #expect(pipeline.requireBackendReady)
         #expect(pipeline.mixMode == .raw)
+        #expect(pipeline.meetingTranscription == .mixed)
     }
 
     @Test func pipelineMixModeDefaultsToBalanced() throws {
         let pipeline = try Pipeline.parse(["--mode", "meeting"])
         #expect(pipeline.mixMode == .balanced)
+    }
+
+    @Test func pipelineMeetingTranscriptionDefaultsToSeparate() throws {
+        let pipeline = try Pipeline.parse(["--mode", "meeting"])
+        #expect(pipeline.meetingTranscription == .separate)
     }
 
     @Test func mixParsesInputsAndOptions() throws {
@@ -304,5 +336,68 @@ struct CLIParsingTests {
         if let resetHelp = command as? Permissions.ResetHelp {
             #expect(resetHelp.bundleID == "com.example.stt")
         }
+    }
+
+    @Test func speakerEnrollParsesAudioAndProviderOptions() throws {
+        let enroll = try Speaker.Enroll.parse([
+            "Larry Song", "--audio", "/tmp/larry.wav", "--provider", "mfcc-test",
+            "--minimum-speech-seconds", "8.0", "--replace"
+        ])
+        #expect(enroll.displayName == "Larry Song")
+        #expect(enroll.audio == "/tmp/larry.wav")
+        #expect(enroll.duration == nil)
+        #expect(enroll.provider == "mfcc-test")
+        #expect(enroll.minimumSpeechSeconds == 8.0)
+        #expect(enroll.replace)
+    }
+
+    @Test func speakerEnrollRequiresExactlyOneOfAudioOrDuration() throws {
+        let neither = try Speaker.Enroll.parse(["Larry Song"])
+        #expect(throws: (any Error).self) {
+            try neither.run()
+        }
+
+        let both = try Speaker.Enroll.parse(["Larry Song", "--audio", "/tmp/a.wav", "--duration", "10"])
+        #expect(throws: (any Error).self) {
+            try both.run()
+        }
+    }
+
+    @Test func speakerRenameParsesBothNames() throws {
+        let rename = try Speaker.Rename.parse(["Larry", "Larry Song"])
+        #expect(rename.existingName == "Larry")
+        #expect(rename.newName == "Larry Song")
+    }
+
+    @Test func speakerRemoveRequiresYesFlag() throws {
+        let withoutYes = try Speaker.Remove.parse(["Larry Song"])
+        #expect(throws: (any Error).self) {
+            try withoutYes.run()
+        }
+
+        let withYes = try Speaker.Remove.parse(["Larry Song", "--yes"])
+        #expect(withYes.yes)
+    }
+
+    @Test func identifyParsesThresholdAndMarginOptions() throws {
+        let identify = try Identify.parse([
+            "/tmp/clip.wav", "--provider", "mfcc-test", "--threshold", "0.8", "--margin", "0.1",
+            "--json", "/tmp/out.json"
+        ])
+        #expect(identify.audioPath == "/tmp/clip.wav")
+        #expect(identify.provider == "mfcc-test")
+        #expect(identify.threshold == 0.8)
+        #expect(identify.margin == 0.1)
+        #expect(identify.json == "/tmp/out.json")
+    }
+
+    @Test func topLevelCommandRoutesToSpeakerListSubcommand() throws {
+        let command = try STT.parseAsRoot(["speaker", "list"])
+        #expect(command is Speaker.ListProfiles)
+    }
+
+    @Test func topLevelCommandRoutesToIdentifySubcommand() throws {
+        let command = try STT.parseAsRoot(["identify", "/tmp/clip.wav"])
+        #expect(command is Identify)
     }
 }

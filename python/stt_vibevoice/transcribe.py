@@ -33,6 +33,7 @@ from .chunking import (
     probe_wav,
 )
 from .normalize import normalize_audio
+from .wav_slicing import write_wav_slice
 
 DEFAULT_MODEL_PATH = "mlx-community/VibeVoice-ASR-8bit"
 DEFAULT_DEVICE = "auto"
@@ -213,22 +214,6 @@ def _transcribe_with_fallback(
         raise
 
 
-def _write_wav_slice(source_path: Path, start: float, end: float, dest_path: Path) -> None:
-    import wave
-
-    with wave.open(str(source_path), "rb") as source:
-        params = source.getparams()
-        frame_rate = source.getframerate()
-        start_frame = int(start * frame_rate)
-        end_frame = int(end * frame_rate)
-        source.setpos(max(0, start_frame))
-        frames = source.readframes(max(0, end_frame - start_frame))
-
-    with wave.open(str(dest_path), "wb") as dest:
-        dest.setparams(params)
-        dest.writeframes(frames)
-
-
 def transcribe_file(
     audio_path: Path,
     model_path: str = DEFAULT_MODEL_PATH,
@@ -262,7 +247,7 @@ def transcribe_file(
         with tempfile.TemporaryDirectory(prefix="stt-vibevoice-chunks-") as chunk_dir:
             for index, (start, end) in enumerate(windows):
                 chunk_path = Path(chunk_dir) / f"chunk_{index:03d}.wav"
-                _write_wav_slice(normalized_path, start, end, chunk_path)
+                write_wav_slice(normalized_path, start, end, chunk_path)
                 payload = _transcribe_with_fallback(
                     generate_transcription, mx, chunk_path, model_path, device, max_new_tokens
                 )

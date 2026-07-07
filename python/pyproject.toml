@@ -14,6 +14,10 @@ dependencies = []
 mlx = [
     "mlx-audio[stt]",
 ]
+speechbrain = [
+    "speechbrain",
+    "torchaudio",
+]
 dev = [
     "pytest>=7.0",
     "pytest-cov",

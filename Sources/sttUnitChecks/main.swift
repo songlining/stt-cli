@@ -527,6 +527,132 @@ func runChecks() throws {
         try checkEqual(command, "/bin/sh", "SIGTERM-ignoring timeout command")
     }
     try check(Date().timeIntervalSince(ignoringStartedAt) < 4, "SIGTERM-ignoring process timeout returns promptly")
+
+    // MARK: - Speaker identification: CLI parsing
+
+    let speakerEnroll = try Speaker.Enroll.parse([
+        "Larry Song", "--audio", "/tmp/larry.wav", "--provider", "mfcc-test",
+        "--minimum-speech-seconds", "8.0", "--replace"
+    ])
+    try checkEqual(speakerEnroll.displayName, "Larry Song", "speaker enroll display name parses")
+    try checkEqual(speakerEnroll.audio, "/tmp/larry.wav", "speaker enroll audio parses")
+    try checkEqual(speakerEnroll.provider, "mfcc-test", "speaker enroll provider parses")
+    try check(speakerEnroll.replace, "speaker enroll replace flag parses")
+
+    let speakerEnrollNeitherAudioNorDuration = try Speaker.Enroll.parse(["Larry Song"])
+    do {
+        try speakerEnrollNeitherAudioNorDuration.run()
+        throw CheckFailure(message: "speaker enroll without --audio or --duration should fail")
+    } catch {
+        let message = "\(error)"
+        try check(message.contains("Exactly one of --audio or --duration"), "speaker enroll requires exactly one source")
+    }
+
+    let speakerRemoveWithoutYes = try Speaker.Remove.parse(["Larry Song"])
+    do {
+        try speakerRemoveWithoutYes.run()
+        throw CheckFailure(message: "speaker remove without --yes should fail")
+    } catch {
+        try check("\(error)".contains("--yes"), "speaker remove requires --yes")
+    }
+
+    let identifyParsed = try Identify.parse([
+        "/tmp/clip.wav", "--provider", "mfcc-test", "--threshold", "0.8", "--margin", "0.1"
+    ])
+    try checkEqual(identifyParsed.audioPath, "/tmp/clip.wav", "identify audio path parses")
+    try checkEqual(identifyParsed.threshold, 0.8, "identify threshold parses")
+    try checkEqual(identifyParsed.margin, 0.1, "identify margin parses")
+
+    let topLevelSpeakerList = try STT.parseAsRoot(["speaker", "list"])
+    try check(topLevelSpeakerList is Speaker.ListProfiles, "top-level routes to speaker list subcommand")
+    let topLevelIdentify = try STT.parseAsRoot(["identify", "/tmp/clip.wav"])
+    try check(topLevelIdentify is Identify, "top-level routes to identify subcommand")
+
+    // MARK: - Speaker identification: SpeakerLabelResolver conflict policy
+
+    func okExtraction(speakerId: String) -> SpeakerExtractionResult {
+        SpeakerExtractionResult(speakerId: speakerId, provider: "mfcc-test", model: "stt-vibevoice/mfcc-test-v1", embedding: [1.0, 0.0], durationSeconds: 10.0, segmentCount: 2, status: "ok")
+    }
+
+    let noProfilesResult = SpeakerLabelResolver.resolve(
+        candidates: [SpeakerCandidateInput(speakerId: "0", extraction: okExtraction(speakerId: "0"), matchResult: nil)],
+        hasProfiles: false
+    )
+    try checkEqual(noProfilesResult["0"]?.matchStatus, SpeakerMatchStatus.noProfiles, "resolver: no profiles keeps speaker anonymous")
+
+    let matchedBest = SpeakerMatchBestMatch(profileId: "profile-a", displayName: "Larry", confidence: 0.95, margin: 0.2, matched: true, status: "matched")
+    let matchedResult = SpeakerLabelResolver.resolve(
+        candidates: [SpeakerCandidateInput(speakerId: "0", extraction: okExtraction(speakerId: "0"), matchResult: SpeakerMatchResult(bestMatch: matchedBest, candidates: [], skippedProfiles: [], warnings: []))],
+        hasProfiles: true
+    )
+    try checkEqual(matchedResult["0"]?.displayName, "Larry", "resolver: high-confidence match relabels speaker")
+    try checkEqual(matchedResult["0"]?.profileId, "profile-a", "resolver: high-confidence match sets profile id")
+
+    let duplicateBest0 = SpeakerMatchBestMatch(profileId: "profile-a", displayName: "Larry", confidence: 0.95, margin: 0.2, matched: true, status: "matched")
+    let duplicateBest1 = SpeakerMatchBestMatch(profileId: "profile-a", displayName: "Larry", confidence: 0.85, margin: 0.15, matched: true, status: "matched")
+    let duplicateResult = SpeakerLabelResolver.resolve(
+        candidates: [
+            SpeakerCandidateInput(speakerId: "0", extraction: okExtraction(speakerId: "0"), matchResult: SpeakerMatchResult(bestMatch: duplicateBest0, candidates: [], skippedProfiles: [], warnings: [])),
+            SpeakerCandidateInput(speakerId: "1", extraction: okExtraction(speakerId: "1"), matchResult: SpeakerMatchResult(bestMatch: duplicateBest1, candidates: [], skippedProfiles: [], warnings: []))
+        ],
+        hasProfiles: true
+    )
+    try checkEqual(duplicateResult["0"]?.matchStatus, SpeakerMatchStatus.matched, "resolver: duplicate match keeps higher-confidence speaker matched")
+    try checkEqual(duplicateResult["1"]?.matchStatus, SpeakerMatchStatus.duplicateProfileMatch, "resolver: duplicate match demotes lower-confidence speaker")
+    try checkEqual(duplicateResult["1"]?.profileId, nil, "resolver: demoted duplicate has no profile id")
+
+    // MARK: - Speaker identification: end-to-end enroll/list/identify/remove (mfcc-test provider)
+
+    if FileManager.default.fileExists(atPath: pythonBackendDir.path) {
+        let speakerHomeDir = FileManager.default.temporaryDirectory.appendingPathComponent("stt-speaker-e2e-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: speakerHomeDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: speakerHomeDir) }
+
+        let sampleWAV = speakerHomeDir.appendingPathComponent("sample.wav")
+        var pcmData = Data()
+        let frameCount = 9 * 16_000
+        for i in 0..<frameCount {
+            let sample: Int16 = (i / 64) % 2 == 0 ? 8000 : -8000
+            withUnsafeBytes(of: sample.littleEndian) { pcmData.append(contentsOf: $0) }
+        }
+        let header = WAVWriter.header(sampleRate: 16_000, channels: 1, bitDepth: 16, dataSize: UInt32(pcmData.count))
+        var fileData = header
+        fileData.append(pcmData)
+        try fileData.write(to: sampleWAV)
+
+        let extraction = try PythonSpeakerIdentifier.extractWholeAudio(
+            audioPath: sampleWAV.path,
+            provider: "mfcc-test",
+            minimumSpeechSeconds: 8.0,
+            workingDirectory: pythonBackendDir,
+            timeout: 15
+        )
+        try check(extraction.isOK, "speaker-id extract whole audio succeeds end-to-end")
+
+        let profilesDir = speakerHomeDir.appendingPathComponent("speakers", isDirectory: true)
+        let store = SpeakerProfileStore(directory: profilesDir)
+        let profile = SpeakerProfile(
+            displayName: "Larry Song",
+            embeddingProvider: extraction.provider,
+            embeddingModel: extraction.model ?? "",
+            embedding: extraction.embedding ?? []
+        )
+        try store.save(profile)
+        try checkEqual(try store.listSummaries().count, 1, "speaker profile store save round trip")
+
+        let matchResultE2E = try SpeakerCLISupport.match(
+            extraction: extraction,
+            profiles: try store.listProfiles(),
+            threshold: 0.5,
+            margin: 0.01,
+            workingDirectory: pythonBackendDir
+        )
+        try checkEqual(matchResultE2E.bestMatch?.profileId, profile.id.uuidString, "end-to-end match identifies enrolled profile")
+        try check(matchResultE2E.bestMatch?.matched == true, "end-to-end match is confident")
+
+        try store.delete(id: profile.id)
+        try checkEqual(try store.listSummaries().count, 0, "speaker profile store delete removes profile")
+    }
 }
 
 do {

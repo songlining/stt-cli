@@ -14,8 +14,11 @@ public struct STT: ParsableCommand {
             Devices.self,
             Record.self,
             Transcribe.self,
+            TranscribeMeeting.self,
             Pipeline.self,
             Mix.self,
+            Speaker.self,
+            Identify.self,
             Permissions.self
         ]
     )
@@ -166,6 +169,11 @@ public enum MixModeArgument: String, ExpressibleByArgument, CaseIterable {
         case .balanced: return .balanced
         }
     }
+}
+
+public enum MeetingTranscriptionModeArgument: String, ExpressibleByArgument, CaseIterable {
+    case separate
+    case mixed
 }
 
 public struct Record: ParsableCommand {
@@ -520,6 +528,162 @@ public struct Transcribe: ParsableCommand {
     }
 }
 
+// MARK: - stt transcribe-meeting
+
+public struct MeetingTranscriptionResult {
+    public let text: String
+    public let jsonData: Data
+    public let backend: String?
+    public let transcribedAudioPaths: [String]
+    public let sourceTranscriptPaths: [String]
+}
+
+public struct TranscribeMeeting: ParsableCommand {
+    public static let configuration = CommandConfiguration(
+        commandName: "transcribe-meeting",
+        abstract: "Transcribe meeting mic/system tracks separately, then merge by timestamp."
+    )
+
+    @Argument(help: "Path to mic.wav.")
+    public var micAudioPath: String
+
+    @Argument(help: "Path to system.wav.")
+    public var systemAudioPath: String
+
+    @Option(name: .long, help: "Path to write a merged plain-text transcript.")
+    public var output: String?
+
+    @Option(name: .long, help: "Path to write merged structured JSON output.")
+    public var json: String?
+
+    @Option(name: .long, help: "Compute device: auto, gpu, or cpu.")
+    public var device: TranscriberDevice = .auto
+
+    @Option(name: .long, help: "Optional transcription timeout in seconds for each source track.")
+    public var timeout: Double?
+
+    @Option(name: .long, help: "Model path or Hugging Face model ID to pass to the Python backend.")
+    public var model: String?
+
+    @Option(name: .long, help: "Maximum new tokens for VibeVoice generation.")
+    public var maxNewTokens: Int?
+
+    @Option(name: .long, help: "Path to the Python backend directory containing stt_vibevoice.")
+    public var pythonBackend: String?
+
+    @Flag(name: .long, help: "Check backend readiness before transcribing and fail early if dependencies are missing.")
+    public var requireBackendReady: Bool = false
+
+    public init() {}
+
+    public func run() throws {
+        if let timeout, timeout <= 0 {
+            throw ValidationError("--timeout must be greater than 0 seconds")
+        }
+        if let maxNewTokens, maxNewTokens <= 0 {
+            throw ValidationError("--max-new-tokens must be greater than 0")
+        }
+
+        let workingDir = try Transcribe.resolvePythonBackendDirectory(overridePath: pythonBackend)
+        if requireBackendReady {
+            try Transcribe.requirePythonBackendReady(workingDirectory: workingDir, timeout: timeout)
+        }
+
+        let result = try Self.transcribeMeeting(
+            micURL: URL(fileURLWithPath: micAudioPath),
+            systemURL: URL(fileURLWithPath: systemAudioPath),
+            outputTextURL: output.map { URL(fileURLWithPath: $0) },
+            outputJSONURL: json.map { URL(fileURLWithPath: $0) },
+            device: device.rawValue,
+            workingDirectory: workingDir,
+            timeout: timeout,
+            modelPath: model,
+            maxNewTokens: maxNewTokens
+        )
+        print(result.text)
+    }
+
+    public static func transcribeMeeting(micURL: URL,
+                                         systemURL: URL,
+                                         outputTextURL: URL?,
+                                         outputJSONURL: URL?,
+                                         device: String,
+                                         workingDirectory: URL?,
+                                         timeout: TimeInterval?,
+                                         modelPath: String?,
+                                         maxNewTokens: Int?) throws -> MeetingTranscriptionResult {
+        let micAvailable = (try? Paths.requireNonEmptyFile(micURL.path)) != nil
+        let systemAvailable = (try? Paths.requireNonEmptyFile(systemURL.path)) != nil
+        guard micAvailable || systemAvailable else {
+            _ = try Paths.requireNonEmptyFile(micURL.path)
+            _ = try Paths.requireNonEmptyFile(systemURL.path)
+            throw ValidationError("No transcribable meeting audio found; both mic and system tracks are missing or empty.")
+        }
+
+        let artifactBase = outputJSONURL ?? outputTextURL ?? FileManager.default.temporaryDirectory.appendingPathComponent("stt-meeting-\(UUID().uuidString).json")
+        let micJSONURL = sourceArtifactURL(from: artifactBase, source: "mic", extension: "json")
+        let micTextURL = sourceArtifactURL(from: outputTextURL ?? artifactBase, source: "mic", extension: "txt")
+        let systemJSONURL = sourceArtifactURL(from: artifactBase, source: "system", extension: "json")
+        let systemTextURL = sourceArtifactURL(from: outputTextURL ?? artifactBase, source: "system", extension: "txt")
+
+        var backendNames: [String] = []
+        var sourceTranscriptPaths: [String] = []
+        var transcribedAudioPaths: [String] = []
+
+        if micAvailable {
+            let result = try PythonTranscriber.transcribe(
+                audioPath: micURL.path,
+                outputTextPath: micTextURL.path,
+                outputJSONPath: micJSONURL.path,
+                device: device,
+                workingDirectory: workingDirectory,
+                timeout: timeout,
+                modelPath: modelPath,
+                maxNewTokens: maxNewTokens
+            )
+            if let backend = result.backend { backendNames.append(backend) }
+            sourceTranscriptPaths += [micTextURL.path, micJSONURL.path]
+            transcribedAudioPaths.append(micURL.path)
+        }
+
+        if systemAvailable {
+            let result = try PythonTranscriber.transcribe(
+                audioPath: systemURL.path,
+                outputTextPath: systemTextURL.path,
+                outputJSONPath: systemJSONURL.path,
+                device: device,
+                workingDirectory: workingDirectory,
+                timeout: timeout,
+                modelPath: modelPath,
+                maxNewTokens: maxNewTokens
+            )
+            if let backend = result.backend { backendNames.append(backend) }
+            sourceTranscriptPaths += [systemTextURL.path, systemJSONURL.path]
+            transcribedAudioPaths.append(systemURL.path)
+        }
+
+        let merge = try TranscriptMerger.merge(
+            micJSONURL: micAvailable ? micJSONURL : nil,
+            systemJSONURL: systemAvailable ? systemJSONURL : nil,
+            outputTextURL: outputTextURL,
+            outputJSONURL: outputJSONURL
+        )
+        return MeetingTranscriptionResult(
+            text: merge.text,
+            jsonData: merge.jsonData,
+            backend: backendNames.isEmpty ? nil : Array(Set(backendNames)).sorted().joined(separator: "+"),
+            transcribedAudioPaths: transcribedAudioPaths,
+            sourceTranscriptPaths: sourceTranscriptPaths
+        )
+    }
+
+    private static func sourceArtifactURL(from baseURL: URL, source: String, extension ext: String) -> URL {
+        let directory = baseURL.deletingLastPathComponent()
+        let stem = baseURL.deletingPathExtension().lastPathComponent
+        return directory.appendingPathComponent("\(stem).\(source).\(ext)")
+    }
+}
+
 // MARK: - stt pipeline
 
 public struct Pipeline: ParsableCommand {
@@ -560,6 +724,9 @@ public struct Pipeline: ParsableCommand {
 
     @Option(name: .long, help: "Mixing strategy for mixed.wav in meeting mode: raw or balanced (default: balanced).")
     public var mixMode: MixModeArgument = .balanced
+
+    @Option(name: .long, help: "Meeting transcription strategy: separate transcribes mic/system independently and merges them; mixed preserves legacy single-pass mixed.wav transcription (default: separate).")
+    public var meetingTranscription: MeetingTranscriptionModeArgument = .separate
 
     public init() {}
 
@@ -629,7 +796,12 @@ public struct Pipeline: ParsableCommand {
             print("Note: `stt pipeline` records until you press Ctrl-C, then transcribes automatically.")
         }
         if mode == .meeting {
-            print("Note: meeting pipeline records separate mic/system tracks, then transcribes mixed.wav when mixing succeeds (falls back to mic.wav otherwise).")
+            switch meetingTranscription {
+            case .separate:
+                print("Note: meeting pipeline records separate mic/system tracks, transcribes both independently, then merges by timestamp.")
+            case .mixed:
+                print("Note: meeting pipeline uses legacy mixed.wav transcription (falls back to mic.wav if mixing fails).")
+            }
         }
 
         do {
@@ -650,43 +822,82 @@ public struct Pipeline: ParsableCommand {
 
             if mode == .meeting {
                 let selection = Self.resolveMeetingAudioSource(micURL: micURL, systemURL: systemURL, mixedURL: mixedURL, mode: mixMode.mixMode)
-                audioToTranscribeURL = selection.audioToTranscribeURL
                 outputURLs = selection.outputURLs
                 state.outputPaths = outputURLs.map(\.path)
-                state.transcribedAudioPath = audioToTranscribeURL.path
                 meetingMixNote = selection.note
                 meetingDriftNote = selection.driftNote
                 if let note = selection.note {
                     print("[NOTE] \(note)")
-                } else {
-                    print("Transcribing mixed meeting audio: \(audioToTranscribeURL.path)")
-                    if let driftNote = selection.driftNote { print("[NOTE] \(driftNote)") }
+                } else if let driftNote = selection.driftNote {
+                    print("[NOTE] \(driftNote)")
                 }
-            }
 
-            try Self.requireTranscribableAudio(at: audioToTranscribeURL)
-
-            let result = try PythonTranscriber.transcribe(
-                audioPath: audioToTranscribeURL.path,
-                outputTextPath: transcriptTextURL.path,
-                outputJSONPath: transcriptJSONURL.path,
-                device: device.rawValue,
-                workingDirectory: backendDir,
-                timeout: transcribeTimeout,
-                modelPath: model,
-                maxNewTokens: maxNewTokens
-            )
-
-            if let text = result.transcriptText {
-                print(text)
+                switch meetingTranscription {
+                case .separate:
+                    print("Transcribing meeting tracks separately: \(micURL.path) + \(systemURL.path)")
+                    let result = try TranscribeMeeting.transcribeMeeting(
+                        micURL: micURL,
+                        systemURL: systemURL,
+                        outputTextURL: transcriptTextURL,
+                        outputJSONURL: transcriptJSONURL,
+                        device: device.rawValue,
+                        workingDirectory: backendDir,
+                        timeout: transcribeTimeout,
+                        modelPath: model,
+                        maxNewTokens: maxNewTokens
+                    )
+                    print(result.text)
+                    state.transcribedAudioPath = result.transcribedAudioPaths.joined(separator: "+")
+                    state.transcribedAudioPaths = result.transcribedAudioPaths
+                    let meetingNotes = [meetingMixNote, meetingDriftNote].compactMap { $0 }.joined(separator: "\n")
+                    persistState(notes: meetingNotes.isEmpty ? nil : meetingNotes, backend: result.backend)
+                case .mixed:
+                    audioToTranscribeURL = selection.audioToTranscribeURL
+                    state.transcribedAudioPath = audioToTranscribeURL.path
+                    state.transcribedAudioPaths = [audioToTranscribeURL.path]
+                    print("Transcribing mixed meeting audio: \(audioToTranscribeURL.path)")
+                    try Self.requireTranscribableAudio(at: audioToTranscribeURL)
+                    let result = try PythonTranscriber.transcribe(
+                        audioPath: audioToTranscribeURL.path,
+                        outputTextPath: transcriptTextURL.path,
+                        outputJSONPath: transcriptJSONURL.path,
+                        device: device.rawValue,
+                        workingDirectory: backendDir,
+                        timeout: transcribeTimeout,
+                        modelPath: model,
+                        maxNewTokens: maxNewTokens
+                    )
+                    if let text = result.transcriptText {
+                        print(text)
+                    } else {
+                        print("Transcription complete. Raw backend output:")
+                        print(result.raw)
+                    }
+                    let meetingNotes = [meetingMixNote, meetingDriftNote].compactMap { $0 }.joined(separator: "\n")
+                    persistState(notes: meetingNotes.isEmpty ? nil : meetingNotes, backend: result.backend)
+                }
             } else {
-                print("Transcription complete. Raw backend output:")
-                print(result.raw)
+                try Self.requireTranscribableAudio(at: audioToTranscribeURL)
+
+                let result = try PythonTranscriber.transcribe(
+                    audioPath: audioToTranscribeURL.path,
+                    outputTextPath: transcriptTextURL.path,
+                    outputJSONPath: transcriptJSONURL.path,
+                    device: device.rawValue,
+                    workingDirectory: backendDir,
+                    timeout: transcribeTimeout,
+                    modelPath: model,
+                    maxNewTokens: maxNewTokens
+                )
+
+                if let text = result.transcriptText {
+                    print(text)
+                } else {
+                    print("Transcription complete. Raw backend output:")
+                    print(result.raw)
+                }
+                persistState(backend: result.backend)
             }
-            // Successful meeting runs may carry a non-fatal mix fallback note;
-            // mic/system modes keep nil notes so existing success metadata stays clean.
-            let meetingNotes = [meetingMixNote, meetingDriftNote].compactMap { $0 }.joined(separator: "\n")
-            persistState(notes: meetingNotes.isEmpty ? nil : meetingNotes, backend: result.backend)
         } catch {
             persistState(notes: "Pipeline failed: \(error.localizedDescription)")
             throw error
@@ -806,6 +1017,360 @@ public struct Permissions: ParsableCommand {
             print(AudioPermissions.audioCaptureResetGuidance(bundleID: bundleID))
             print("")
             print(AudioPermissions.screenRecordingResetGuidance(bundleID: bundleID))
+        }
+    }
+}
+
+// MARK: - shared speaker-id CLI helpers
+
+public enum SpeakerCLISupport {
+    public static func resolveProfilesDirectory(config: STTConfig, overridePath: String?) -> URL {
+        if let overridePath, !overridePath.isEmpty {
+            return URL(fileURLWithPath: overridePath, isDirectory: true)
+        }
+        return Paths.speakerProfilesDirectory(config: config)
+    }
+
+    public static func resolvedProvider(cliValue: String?, config: STTConfig) -> String {
+        cliValue.flatMap { $0.isEmpty ? nil : $0 } ?? config.speakerIdentification.provider
+    }
+
+    public static func resolvedMinimumSpeechSeconds(cliValue: Double?, config: STTConfig) -> Double {
+        cliValue ?? config.speakerIdentification.minimumSpeechSeconds
+    }
+
+    public static func resolvedThreshold(cliValue: Double?, config: STTConfig) -> Double {
+        cliValue ?? config.speakerIdentification.matchThreshold
+    }
+
+    public static func resolvedMargin(cliValue: Double?, config: STTConfig) -> Double {
+        cliValue ?? config.speakerIdentification.matchMargin
+    }
+
+    /// Writes flattened profiles + a candidate embedding to temp files and
+    /// runs `PythonSpeakerIdentifier.match`, cleaning up the temp files
+    /// afterward regardless of outcome.
+    public static func match(extraction: SpeakerExtractionResult,
+                       profiles: [SpeakerProfile],
+                       threshold: Double,
+                       margin: Double,
+                       workingDirectory: URL?) throws -> SpeakerMatchResult {
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("stt-speaker-match-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let profilesURL = tmpDir.appendingPathComponent("profiles.json")
+        let candidateURL = tmpDir.appendingPathComponent("candidate.json")
+        try PythonSpeakerIdentifier.writeFlattenedProfiles(profiles, to: profilesURL)
+        try PythonSpeakerIdentifier.writeCandidate(extraction, to: candidateURL)
+
+        return try PythonSpeakerIdentifier.match(
+            candidateJSONPath: candidateURL.path,
+            profilesJSONPath: profilesURL.path,
+            threshold: threshold,
+            margin: margin,
+            workingDirectory: workingDirectory
+        )
+    }
+}
+
+// MARK: - stt speaker
+
+public struct Speaker: ParsableCommand {
+    public static let configuration = CommandConfiguration(
+        abstract: "Manage local speaker enrollment profiles (stored locally; see privacy notes in README).",
+        subcommands: [Enroll.self, ListProfiles.self, Rename.self, Remove.self]
+    )
+
+    public init() {}
+
+    public struct Enroll: ParsableCommand {
+        public static let configuration = CommandConfiguration(abstract: "Enroll a speaker profile from an audio sample or a short mic recording.")
+
+        @Argument(help: "Display name for this speaker.")
+        public var displayName: String
+
+        @Option(name: .long, help: "Path to an existing clean audio sample.")
+        public var audio: String?
+
+        @Option(name: .long, help: "Record a mic sample for this many seconds instead of using --audio.")
+        public var duration: Double?
+
+        @Flag(name: .long, help: "Replace an existing profile with this display name.")
+        public var replace: Bool = false
+
+        @Option(name: .long, help: "Embedding provider to use (default: from config, else speechbrain).")
+        public var provider: String?
+
+        @Option(name: .long, help: "Minimum total speech seconds required (default: from config, else 8.0).")
+        public var minimumSpeechSeconds: Double?
+
+        @Option(name: .long, help: "Path to stt config JSON.")
+        public var config: String?
+
+        @Option(name: .long, help: "Override the configured speaker profiles directory.")
+        public var profilesDir: String?
+
+        @Option(name: .long, help: "Path to the Python backend directory containing stt_vibevoice.")
+        public var pythonBackend: String?
+
+        public init() {}
+
+        public func run() throws {
+            guard (audio != nil) != (duration != nil) else {
+                throw ValidationError("Exactly one of --audio or --duration is required.")
+            }
+            if let duration, duration <= 0 {
+                throw ValidationError("--duration must be greater than 0 seconds")
+            }
+
+            let sttConfig = try STTConfigLoader.load(explicitPath: config)
+            let profilesDirectory = SpeakerCLISupport.resolveProfilesDirectory(config: sttConfig, overridePath: profilesDir)
+            let store = SpeakerProfileStore(directory: profilesDirectory)
+            let backendDir = try Transcribe.resolvePythonBackendDirectory(overridePath: pythonBackend)
+            let providerName = SpeakerCLISupport.resolvedProvider(cliValue: provider, config: sttConfig)
+            let minSeconds = SpeakerCLISupport.resolvedMinimumSpeechSeconds(cliValue: minimumSpeechSeconds, config: sttConfig)
+
+            let sampleAudioURL: URL
+            var temporaryRecordingURL: URL?
+            if let audio {
+                sampleAudioURL = try Paths.requireNonEmptyFile(audio)
+            } else {
+                let recordedURL = FileManager.default.temporaryDirectory.appendingPathComponent("stt-enroll-\(UUID().uuidString).wav")
+                temporaryRecordingURL = recordedURL
+                let recorder = MicRecorder()
+                try recorder.start(outputURL: recordedURL, inputDeviceID: nil)
+                print("Recording \(String(format: "%.1f", duration ?? 0))s enrollment sample for \"\(displayName)\"; speak clearly...")
+                Thread.sleep(forTimeInterval: duration ?? 0)
+                let result = try recorder.stop()
+                sampleAudioURL = result.outputURL
+                if let warning = result.emptyAudioWarning { print(warning) }
+            }
+            defer {
+                if let temporaryRecordingURL { try? FileManager.default.removeItem(at: temporaryRecordingURL) }
+            }
+
+            let extraction = try PythonSpeakerIdentifier.extractWholeAudio(
+                audioPath: sampleAudioURL.path,
+                provider: providerName,
+                minimumSpeechSeconds: minSeconds,
+                workingDirectory: backendDir
+            )
+            guard extraction.isOK, let embedding = extraction.embedding, let model = extraction.model else {
+                throw ValidationError("Enrollment sample has only \(String(format: "%.1f", extraction.durationSeconds))s of usable audio; at least \(String(format: "%.1f", minSeconds))s is required.")
+            }
+
+            let existingProfile = try? store.findByName(displayName)
+            if existingProfile != nil, !replace {
+                throw ValidationError("Speaker \"\(displayName)\" already exists; pass --replace to replace its enrollment.")
+            }
+
+            let profileID = existingProfile?.id ?? UUID()
+            let sampleDirectory = store.sampleDirectory(forProfileID: profileID)
+            try Paths.ensureDirectoryExists(sampleDirectory)
+            let sampleFileName = "\(Paths.timestampToken()).wav"
+            let destinationSampleURL = sampleDirectory.appendingPathComponent(sampleFileName)
+            try? FileManager.default.removeItem(at: destinationSampleURL)
+            try FileManager.default.copyItem(at: sampleAudioURL, to: destinationSampleURL)
+            let relativeSamplePath = "samples/\(profileID.uuidString)/\(sampleFileName)"
+
+            let now = Date()
+            let profile = SpeakerProfile(
+                id: profileID,
+                displayName: displayName,
+                createdAt: existingProfile?.createdAt ?? now,
+                updatedAt: now,
+                embeddingProvider: providerName,
+                embeddingModel: model,
+                embedding: embedding,
+                samplePaths: replace ? [relativeSamplePath] : (existingProfile?.samplePaths ?? []) + [relativeSamplePath],
+                sampleDurationSeconds: extraction.durationSeconds,
+                notes: existingProfile?.notes
+            )
+            try store.save(profile)
+
+            print("Enrolled speaker \"\(displayName)\" (id: \(profileID.uuidString)) using provider \(providerName).")
+        }
+    }
+
+    public struct ListProfiles: ParsableCommand {
+        public static let configuration = CommandConfiguration(commandName: "list", abstract: "List enrolled speaker profiles.")
+
+        @Option(name: .long, help: "Path to stt config JSON.")
+        public var config: String?
+
+        @Option(name: .long, help: "Override the configured speaker profiles directory.")
+        public var profilesDir: String?
+
+        public init() {}
+
+        public func run() throws {
+            let sttConfig = try STTConfigLoader.load(explicitPath: config)
+            let profilesDirectory = SpeakerCLISupport.resolveProfilesDirectory(config: sttConfig, overridePath: profilesDir)
+            let store = SpeakerProfileStore(directory: profilesDirectory)
+            let summaries = try store.listSummaries()
+
+            if summaries.isEmpty {
+                print("No speaker profiles enrolled. Use `stt speaker enroll <name> --audio <file>` to add one.")
+                return
+            }
+
+            print("Enrolled speaker profiles (\(profilesDirectory.path)):")
+            for summary in summaries {
+                print("  [\(summary.id.uuidString)] \(summary.displayName) — provider=\(summary.embeddingProvider) samples=\(summary.sampleCount) updated=\(summary.updatedAt)")
+            }
+        }
+    }
+
+    public struct Rename: ParsableCommand {
+        public static let configuration = CommandConfiguration(abstract: "Rename an enrolled speaker profile.")
+
+        @Argument(help: "Existing display name.")
+        public var existingName: String
+
+        @Argument(help: "New display name.")
+        public var newName: String
+
+        @Option(name: .long, help: "Path to stt config JSON.")
+        public var config: String?
+
+        @Option(name: .long, help: "Override the configured speaker profiles directory.")
+        public var profilesDir: String?
+
+        public init() {}
+
+        public func run() throws {
+            let sttConfig = try STTConfigLoader.load(explicitPath: config)
+            let profilesDirectory = SpeakerCLISupport.resolveProfilesDirectory(config: sttConfig, overridePath: profilesDir)
+            let store = SpeakerProfileStore(directory: profilesDirectory)
+            let profile = try store.findByName(existingName)
+            try store.rename(id: profile.id, to: newName)
+            print("Renamed \"\(existingName)\" to \"\(newName)\" (id: \(profile.id.uuidString)).")
+        }
+    }
+
+    public struct Remove: ParsableCommand {
+        public static let configuration = CommandConfiguration(abstract: "Remove an enrolled speaker profile and its stored samples.")
+
+        @Argument(help: "Display name of the profile to remove.")
+        public var displayName: String
+
+        @Flag(name: .long, help: "Confirm removal (required; there is no interactive prompt).")
+        public var yes: Bool = false
+
+        @Option(name: .long, help: "Path to stt config JSON.")
+        public var config: String?
+
+        @Option(name: .long, help: "Override the configured speaker profiles directory.")
+        public var profilesDir: String?
+
+        public init() {}
+
+        public func run() throws {
+            guard yes else {
+                throw ValidationError("Refusing to remove speaker \"\(displayName)\" without --yes.")
+            }
+            let sttConfig = try STTConfigLoader.load(explicitPath: config)
+            let profilesDirectory = SpeakerCLISupport.resolveProfilesDirectory(config: sttConfig, overridePath: profilesDir)
+            let store = SpeakerProfileStore(directory: profilesDirectory)
+            let profile = try store.findByName(displayName)
+            try store.delete(id: profile.id)
+            print("Removed speaker \"\(displayName)\" (id: \(profile.id.uuidString)) and its stored samples.")
+        }
+    }
+}
+
+// MARK: - stt identify
+
+public struct Identify: ParsableCommand {
+    public static let configuration = CommandConfiguration(abstract: "Identify a single audio clip against enrolled speaker profiles.")
+
+    @Argument(help: "Path to the audio clip to identify.")
+    public var audioPath: String
+
+    @Option(name: .long, help: "Embedding provider to use (default: from config, else speechbrain).")
+    public var provider: String?
+
+    @Option(name: .long, help: "Minimum match confidence required (default: from config, else 0.78).")
+    public var threshold: Double?
+
+    @Option(name: .long, help: "Minimum margin over the runner-up required (default: from config, else 0.05).")
+    public var margin: Double?
+
+    @Option(name: .long, help: "Minimum total speech seconds required (default: from config, else 8.0).")
+    public var minimumSpeechSeconds: Double?
+
+    @Option(name: .long, help: "Path to stt config JSON.")
+    public var config: String?
+
+    @Option(name: .long, help: "Override the configured speaker profiles directory.")
+    public var profilesDir: String?
+
+    @Option(name: .long, help: "Path to the Python backend directory containing stt_vibevoice.")
+    public var pythonBackend: String?
+
+    @Option(name: .long, help: "Path to write the identification result as JSON.")
+    public var json: String?
+
+    public init() {}
+
+    public func run() throws {
+        let sttConfig = try STTConfigLoader.load(explicitPath: config)
+        let profilesDirectory = SpeakerCLISupport.resolveProfilesDirectory(config: sttConfig, overridePath: profilesDir)
+        let store = SpeakerProfileStore(directory: profilesDirectory)
+        let backendDir = try Transcribe.resolvePythonBackendDirectory(overridePath: pythonBackend)
+        let providerName = SpeakerCLISupport.resolvedProvider(cliValue: provider, config: sttConfig)
+        let minSeconds = SpeakerCLISupport.resolvedMinimumSpeechSeconds(cliValue: minimumSpeechSeconds, config: sttConfig)
+        let thresholdValue = SpeakerCLISupport.resolvedThreshold(cliValue: threshold, config: sttConfig)
+        let marginValue = SpeakerCLISupport.resolvedMargin(cliValue: margin, config: sttConfig)
+
+        let audioURL = try Paths.requireNonEmptyFile(audioPath)
+        let profiles = try store.listProfiles()
+
+        let extraction = try PythonSpeakerIdentifier.extractWholeAudio(
+            audioPath: audioURL.path,
+            provider: providerName,
+            minimumSpeechSeconds: minSeconds,
+            workingDirectory: backendDir
+        )
+
+        let candidate = SpeakerCandidateInput(
+            speakerId: "0",
+            extraction: extraction,
+            matchResult: nil
+        )
+
+        let assignment: SpeakerLabelAssignment
+        if !extraction.isOK {
+            assignment = SpeakerLabelResolver.resolve(candidates: [candidate], hasProfiles: !profiles.isEmpty)["0"]
+                ?? SpeakerLabelAssignment(displayName: "Speaker 0", profileId: nil, confidence: nil, margin: nil, matchStatus: SpeakerMatchStatus.tooShort)
+        } else if profiles.isEmpty {
+            assignment = SpeakerLabelResolver.resolve(candidates: [candidate], hasProfiles: false)["0"]
+                ?? SpeakerLabelAssignment(displayName: "Speaker 0", profileId: nil, confidence: nil, margin: nil, matchStatus: SpeakerMatchStatus.noProfiles)
+        } else {
+            let matchResult = try SpeakerCLISupport.match(
+                extraction: extraction,
+                profiles: profiles,
+                threshold: thresholdValue,
+                margin: marginValue,
+                workingDirectory: backendDir
+            )
+            let matchedCandidate = SpeakerCandidateInput(speakerId: "0", extraction: extraction, matchResult: matchResult)
+            assignment = SpeakerLabelResolver.resolve(candidates: [matchedCandidate], hasProfiles: true)["0"]
+                ?? SpeakerLabelAssignment(displayName: "Speaker 0", profileId: nil, confidence: nil, margin: nil, matchStatus: SpeakerMatchStatus.belowThreshold)
+        }
+
+        if assignment.matchStatus == SpeakerMatchStatus.matched {
+            print("Identified as \"\(assignment.displayName)\" (confidence: \(String(format: "%.3f", assignment.confidence ?? 0)), status: \(assignment.matchStatus))")
+        } else {
+            print("Not confidently identified (status: \(assignment.matchStatus)). Staying anonymous.")
+        }
+
+        if let json {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(assignment)
+            try data.write(to: URL(fileURLWithPath: json), options: .atomic)
         }
     }
 }

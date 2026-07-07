@@ -120,6 +120,24 @@ def _check_model_cache() -> Dict[str, Any]:
     }
 
 
+def _check_speaker_identification() -> Dict[str, Any]:
+    """Reports speaker-identification provider availability.
+
+    ``mfcc-test`` is always available (stdlib-only, used for tests/smoke
+    checks). ``speechbrain`` is optional and only reported as available if
+    both ``speechbrain`` and ``torchaudio`` are importable. This section is
+    purely informational and never affects the overall ``ready`` flag,
+    since speaker identification is an opt-in feature.
+    """
+    speechbrain_available = _module_importable("speechbrain") and _module_importable("torchaudio")
+    return {
+        "providers": {
+            "mfcc-test": True,
+            "speechbrain": speechbrain_available,
+        }
+    }
+
+
 def doctor() -> Dict[str, Any]:
     """Run environment checks and return a structured report.
 
@@ -155,6 +173,7 @@ def doctor() -> Dict[str, Any]:
 
     report["runtime"] = _check_runtime_path()
     report["model_cache"] = _check_model_cache()
+    report["speaker_identification"] = _check_speaker_identification()
 
     report["ready"] = bool(
         report["platform"]["is_apple_silicon"]
@@ -242,6 +261,11 @@ def format_report(report: Dict[str, Any]) -> str:
             "exists" if cache.get("exists") else "not found",
         )
     )
+
+    speaker_id = report.get("speaker_identification", {})
+    providers = speaker_id.get("providers", {})
+    for name, available in providers.items():
+        lines.append(f"speaker-id provider {name}: {'available' if available else 'not installed'}")
 
     lines.append("overall ready: {}".format("yes" if report.get("ready") else "no"))
     if not report.get("ready"):
