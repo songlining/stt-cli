@@ -16,11 +16,6 @@ public struct MeetingRecordingResult {
     public let micResult: RecordingResult?
     public let systemResult: RecordingResult?
     public let systemCaptureMethod: SystemAudioCaptureMethod?
-    /// True when mic + system audio were written to two separate WAV files
-    /// (`--separate-tracks`); false means a single combined output was
-    /// requested (currently implemented as separate files under the hood —
-    /// see notes on `MeetingRecorder`).
-    public let separateTracks: Bool
 }
 
 /// Combines microphone + system-audio capture for "meeting" mode.
@@ -64,15 +59,14 @@ public final class MeetingRecorder {
     }
 
     @discardableResult
-    public func stop(separateTracks: Bool) throws -> MeetingRecordingResult {
+    public func stop() throws -> MeetingRecordingResult {
         let method = systemRecorder.activeMethod
         let micResult = try? micRecorder.stop()
         let systemResult = try? systemRecorder.stop()
         return MeetingRecordingResult(
             micResult: micResult,
             systemResult: systemResult,
-            systemCaptureMethod: method,
-            separateTracks: separateTracks
+            systemCaptureMethod: method
         )
     }
 

@@ -82,6 +82,14 @@ public final class StreamingWAVWriter {
     private let bitDepth: UInt16
     private var fileHandle: FileHandle?
     private var bytesWritten: UInt32 = 0
+    /// Bytes appended since the WAV header sizes were last patched to disk.
+    /// Used to keep the on-disk header crash-safe without seeking on every
+    /// append (which would add overhead to the realtime-ish capture path).
+    private var bytesSinceLastHeaderPatch: UInt32 = 0
+    /// Re-patch the on-disk header at most this often, so an abrupt process
+    /// termination (SIGKILL, crash, power loss) never leaves a header that is
+    /// stale by more than ~this many bytes of audio.
+    private static let headerPatchByteInterval: UInt32 = 1 << 20 // 1 MiB
     public let url: URL
 
     public init(url: URL, sampleRate: UInt32, channels: UInt16, bitDepth: UInt16 = 16) throws {
@@ -95,16 +103,40 @@ public final class StreamingWAVWriter {
             throw StreamingWAVWriterError.fileCreationFailed(url.path)
         }
         let handle = try FileHandle(forWritingTo: url)
-        // Reserve space for the header; patched in on finish().
+        // Write the canonical header immediately with dataSize=0 so the file
+        // is always a (currently empty) valid WAV. It is re-patched on every
+        // append interval and on finish().
         handle.write(WAVWriter.header(sampleRate: sampleRate, channels: channels, bitDepth: bitDepth, dataSize: 0))
         self.fileHandle = handle
     }
 
     /// Appends raw PCM bytes (already in the target bit depth/channel layout).
+    /// Periodically rewrites the WAV header in place so the file is never left
+    /// with a stale (header-only) `data` size, even if the process is killed
+    /// (SIGKILL) or crashes mid-capture. Callers in `NativeTapWAVBridge` only
+    /// touch this writer from a single serial queue, so the seek/patch here is
+    /// race-free.
     public func append(_ data: Data) throws {
         guard let fileHandle else { throw StreamingWAVWriterError.notOpen }
         fileHandle.write(data)
-        bytesWritten += UInt32(data.count)
+        bytesWritten &+= UInt32(data.count)
+        bytesSinceLastHeaderPatch &+= UInt32(data.count)
+        if bytesSinceLastHeaderPatch >= Self.headerPatchByteInterval {
+            try patchHeader()
+            bytesSinceLastHeaderPatch = 0
+        }
+    }
+
+    /// Rewrites the 44-byte header at offset 0 with the current `bytesWritten`
+    /// and returns the write offset to the end of the stream so subsequent
+    /// appends continue at the right place.
+    private func patchHeader() throws {
+        guard let fileHandle else { return }
+        let header = WAVWriter.header(sampleRate: sampleRate, channels: channels, bitDepth: bitDepth, dataSize: bytesWritten)
+        try fileHandle.seek(toOffset: 0)
+        fileHandle.write(header)
+        // Return the file offset to the live end of the data stream.
+        try fileHandle.seek(toOffset: UInt64(44) + UInt64(bytesWritten))
     }
 
     /// Finalizes the WAV file by rewriting the header with the correct sizes,

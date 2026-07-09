@@ -20,7 +20,7 @@ struct TranscriptMergerTests {
                 backend: "fake",
                 durationSeconds: 4,
                 text: "测试",
-                segments: [TranscriptSegment(text: "测试", startTime: 1.0, endTime: 2.0, duration: 1.0, speakerID: 0)]
+                segments: [TranscriptSegment(text: "测试", startTime: 1.0, endTime: 2.0, duration: 1.0, speakerID: "0")]
             ),
             to: micURL
         )
@@ -30,7 +30,7 @@ struct TranscriptMergerTests {
                 backend: "fake",
                 durationSeconds: 4,
                 text: "hello",
-                segments: [TranscriptSegment(text: "hello", startTime: 0.5, endTime: 1.5, duration: 1.0, speakerID: 1)]
+                segments: [TranscriptSegment(text: "hello", startTime: 0.5, endTime: 1.5, duration: 1.0, speakerID: "1")]
             ),
             to: systemURL
         )

@@ -117,30 +117,76 @@ def _speechbrain_run_opts() -> Dict[str, str]:
     return {"device": os.environ.get("STT_SPEECHBRAIN_DEVICE", "cpu")}
 
 
-def _load_audio_tensor(audio_path: Path):
-    """Load a WAV file as a (1, samples) float32 torch tensor.
+# Sample rate expected by the speechbrain ECAPA-VoxCeleb model.
+ECAPA_SAMPLE_RATE = 16000
 
-    Uses soundfile (bundled with speechbrain) instead of torchaudio.load,
-    because torchaudio >= 2.11 requires the optional torchcodec package.
-    Falls back to torchaudio if soundfile is unavailable.
+
+def _resample(data, orig_sr: int, target_sr: int):
+    """Resample a 1-D float numpy array from ``orig_sr`` to ``target_sr``.
+
+    Uses ``scipy.signal.resample_poly`` (available wherever speechbrain is).
+    Falls back to linear interpolation via ``numpy.interp`` if scipy is absent.
     """
+    if orig_sr == target_sr:
+        return data
+    try:
+        from math import gcd
+        from scipy.signal import resample_poly  # type: ignore
+        g = gcd(int(orig_sr), int(target_sr))
+        return resample_poly(data, int(target_sr) // g, int(orig_sr) // g).astype(
+            data.dtype
+        )
+    except ImportError:
+        import numpy as np
+        n_out = int(round(len(data) * target_sr / orig_sr))
+        return np.interp(
+            np.linspace(0, len(data) - 1, n_out), np.arange(len(data)), data
+        ).astype(data.dtype)
+
+
+def _load_audio_tensor(audio_path: Path):
+    """Load a WAV file as a (1, samples) float32 torch tensor at 16 kHz mono.
+
+    Multi-channel audio is downmixed to mono; audio not already at 16 kHz is
+    resampled (the ECAPA model expects 16 kHz). Uses soundfile (bundled with
+    speechbrain) instead of torchaudio.load, because torchaudio >= 2.11
+    requires the optional torchcodec package. Falls back to torchaudio if
+    soundfile is unavailable (that path also normalises to mono + 16 kHz).
+    """
+    import numpy as np  # noqa: F401  (used by fallback path)
     import torch  # type: ignore
     try:
         import soundfile as sf  # type: ignore
-        data, _sr = sf.read(str(audio_path))
-        signal = torch.from_numpy(data).float()
-        if signal.ndim == 1:
-            signal = signal.unsqueeze(0)
+        data, sample_rate = sf.read(str(audio_path))
+        # soundfile returns (samples, channels) for multi-channel,
+        # (samples,) for mono.
+        if data.ndim > 1:
+            data = data.mean(axis=1)  # downmix to mono
+        if sample_rate != ECAPA_SAMPLE_RATE:
+            data = _resample(data, sample_rate, ECAPA_SAMPLE_RATE)
+        signal = torch.from_numpy(np.ascontiguousarray(data)).float().unsqueeze(0)
         return signal
     except ImportError:
         import torchaudio  # type: ignore
-        signal, _fs = torchaudio.load(str(audio_path))
+        signal, sample_rate = torchaudio.load(str(audio_path))
+        if signal.shape[0] > 1:
+            signal = signal.mean(dim=0, keepdim=True)  # downmix to mono
+        if sample_rate != ECAPA_SAMPLE_RATE:
+            resampler = torchaudio.transforms.Resample(sample_rate, ECAPA_SAMPLE_RATE)
+            signal = resampler(signal)
         return signal
 
 
-def _speechbrain_embed_file(audio_path: Path) -> List[float]:
+def _import_speechbrain_encoder():
+    """Import the speechbrain EncoderClassifier, raising an actionable error
+    if the optional dependency stack is missing.
+
+    Centralised so the single-file and batched embedding paths share one
+    missing-dependency message.
+    """
     try:
         from speechbrain.inference.speaker import EncoderClassifier  # type: ignore
+        return EncoderClassifier
     except Exception as error:
         raise SpeakerIdError(
             "The 'speechbrain' provider requires the optional 'speechbrain' and "
@@ -151,19 +197,55 @@ def _speechbrain_embed_file(audio_path: Path) -> List[float]:
             "torchaudio`) or use --provider mfcc-test for testing."
         ) from error
 
+
+def _speechbrain_from_hparams(EncoderClassifier):
+    """Instantiate the ECAPA classifier with the standard cache/device options.
+
+    Returns ``(classifier, model_id)``. Centralised so the single-file and
+    batched embedding paths never drift on model id / cache dir / run opts.
+    """
     model_id = _speechbrain_model_id()
+    classifier = EncoderClassifier.from_hparams(
+        source=model_id,
+        savedir=str(_speechbrain_cache_dir(model_id)),
+        run_opts=_speechbrain_run_opts(),
+    )
+    return classifier, model_id
+
+
+def _speechbrain_embed_with(classifier, audio_path: Path) -> List[float]:
+    """Encode one audio file through an already-loaded classifier."""
+    signal = _load_audio_tensor(audio_path)
+    embedding = classifier.encode_batch(signal)
+    return embedding.squeeze().tolist()
+
+
+def _speechbrain_load_classifier():
+    """Load the ECAPA classifier once (for batched embedding)."""
+    EncoderClassifier = _import_speechbrain_encoder()
     try:
-        classifier = EncoderClassifier.from_hparams(
-            source=model_id,
-            savedir=str(_speechbrain_cache_dir(model_id)),
-            run_opts=_speechbrain_run_opts(),
-        )
-        signal = _load_audio_tensor(audio_path)
-        embedding = classifier.encode_batch(signal)
-        return embedding.squeeze().tolist()
+        return _speechbrain_from_hparams(EncoderClassifier)
     except SpeakerIdError:
         raise
     except Exception as error:
+        model_id = _speechbrain_model_id()
+        raise SpeakerIdError(
+            f"speechbrain provider failed to load model '{model_id}': {error}. "
+            "This is often a missing/corrupt model download (check network access and "
+            f"{_speechbrain_cache_dir(model_id)})."
+        ) from error
+
+
+def _speechbrain_embed_file(audio_path: Path) -> List[float]:
+    """Embed a single file, loading the model for this call."""
+    try:
+        EncoderClassifier = _import_speechbrain_encoder()
+        classifier, _model_id = _speechbrain_from_hparams(EncoderClassifier)
+        return _speechbrain_embed_with(classifier, audio_path)
+    except SpeakerIdError:
+        raise
+    except Exception as error:
+        model_id = _speechbrain_model_id()
         raise SpeakerIdError(
             f"speechbrain provider failed to extract an embedding from '{audio_path}': {error}. "
             "This is often a missing/corrupt model download (check network access and "
@@ -171,9 +253,36 @@ def _speechbrain_embed_file(audio_path: Path) -> List[float]:
         ) from error
 
 
+def _speechbrain_embed_files(audio_paths: Sequence[Path]) -> Tuple[List[List[float]], str]:
+    """Embed multiple files, loading the ECAPA model exactly once.
+
+    This is critical for diarisation, which may embed hundreds of segments:
+    loading the ~80MB model per segment (as ``_speechbrain_embed_file`` does)
+    would be catastrophically slow on a real recording.
+    """
+    classifier, model_id = _speechbrain_load_classifier()
+    embeddings: List[List[float]] = []
+    for path in audio_paths:
+        try:
+            embeddings.append(_speechbrain_embed_with(classifier, Path(path)))
+        except SpeakerIdError:
+            raise
+        except Exception as error:
+            raise SpeakerIdError(
+                f"speechbrain provider failed to extract an embedding from '{path}': {error}. "
+                "This is often an unsupported/corrupt audio slice; the source recording "
+                f"and model cache ({_speechbrain_cache_dir(model_id)}) may be worth checking."
+            ) from error
+    return embeddings, model_id
+
+
 _PROVIDERS: Dict[str, Dict[str, Any]] = {
     "mfcc-test": {"model_id": _mfcc_test_model_id, "embed_file": _mfcc_test_embed_file},
-    "speechbrain": {"model_id": _speechbrain_model_id, "embed_file": _speechbrain_embed_file},
+    "speechbrain": {
+        "model_id": _speechbrain_model_id,
+        "embed_file": _speechbrain_embed_file,
+        "embed_files": _speechbrain_embed_files,
+    },
 }
 
 
@@ -196,22 +305,48 @@ def embed_audio_file(audio_path: Path, provider: str) -> Tuple[List[float], str]
     return embedding, spec["model_id"]()
 
 
+def embed_audio_files(audio_paths: Sequence[Path], provider: str) -> Tuple[List[List[float]], str]:
+    """Embed multiple audio files, loading the provider model once.
+
+    Returns ``(embeddings, model_id)``. For the speechbrain provider the ECAPA
+    classifier is loaded a single time regardless of how many paths are given
+    (essential for diarisation, which may embed hundreds of segments). For
+    other providers this loops over the per-file embedder.
+    """
+    spec = _provider(provider)
+    embed_files_fn = spec.get("embed_files")
+    if embed_files_fn is not None:
+        return embed_files_fn([Path(p) for p in audio_paths])
+    embeddings = [spec["embed_file"](Path(p)) for p in audio_paths]
+    return embeddings, spec["model_id"]()
+
+
 # ---------------------------------------------------------------------------
 # Segment selection
 # ---------------------------------------------------------------------------
 
 
-def select_speaker_segments(segments: Sequence[dict], speaker_id: str) -> List[Tuple[float, float]]:
+def select_speaker_segments(
+    segments: Sequence[dict], speaker_id: str, *, skip_nonspeech: bool = True
+) -> List[Tuple[float, float]]:
     """Selects (start, end) ranges for a given diarized ``speaker_id``.
 
     Segments shorter than ``MINIMUM_SEGMENT_SECONDS`` are ignored. Segments
-    missing start/end times are ignored.
+    missing start/end times are ignored. When ``skip_nonspeech`` is True
+    (the default), segments whose text is a bracketed non-speech event tag
+    (``[Silence]``, ``[Environmental Sounds]``, ``[Human Sounds]``, …) are
+    skipped, so preview clips and embeddings are built from actual speech
+    rather than dead air or mouse-clicking noise.
     """
     ranges: List[Tuple[float, float]] = []
     for segment in segments:
         seg_speaker = segment.get("speaker_id")
         if seg_speaker is None or str(seg_speaker) != str(speaker_id):
             continue
+        if skip_nonspeech:
+            text = str(segment.get("text", "")).strip()
+            if text.startswith("[") and text.endswith("]"):
+                continue
         start = segment.get("start_time", segment.get("start"))
         end = segment.get("end_time", segment.get("end"))
         if start is None or end is None:
@@ -225,6 +360,30 @@ def select_speaker_segments(segments: Sequence[dict], speaker_id: str) -> List[T
             continue
         ranges.append((start_f, end_f))
     return ranges
+
+
+def cap_ranges_by_duration(ranges: List[Tuple[float, float]], max_seconds: float) -> List[Tuple[float, float]]:
+    """Truncates a list of (start, end) ranges so the total speech duration
+    does not exceed ``max_seconds``. The final range is truncated mid-way if
+    needed. An empty/zero ``max_seconds`` returns the ranges unchanged.
+    """
+    if max_seconds <= 0:
+        return list(ranges)
+    capped: List[Tuple[float, float]] = []
+    accumulated = 0.0
+    for start, end in ranges:
+        remaining = max_seconds - accumulated
+        if remaining <= 0:
+            break
+        duration = end - start
+        if duration <= remaining:
+            capped.append((start, end))
+            accumulated += duration
+        else:
+            capped.append((start, start + remaining))
+            accumulated += remaining
+            break
+    return capped
 
 
 # ---------------------------------------------------------------------------
@@ -487,6 +646,84 @@ def _cmd_match(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_concatenate(args: argparse.Namespace) -> int:
+    """Build a single playable WAV from one diarized speaker's segments.
+
+    No ML involved -- just WAV slicing + concatenation -- so it is fast and
+    runs in either venv. Used by the interactive ``stt name-speakers`` loop to
+    get a preview+enrollment audio clip per speaker.
+    """
+    from .wav_slicing import concatenate_wav_segments, normalize_wav_file, rank_ranges_by_energy
+
+    audio_path = Path(args.audio)
+    if not audio_path.exists():
+        raise SpeakerIdError(f"Audio file not found: {audio_path}")
+    if not args.segments:
+        raise SpeakerIdError("--segments is required")
+    if args.speaker_id is None:
+        raise SpeakerIdError("--speaker-id is required")
+
+    payload = json.loads(Path(args.segments).read_text(encoding="utf-8"))
+    segments = payload.get("segments") or []
+    ranges = select_speaker_segments(segments, args.speaker_id)
+    if not ranges:
+        raise SpeakerIdError(
+            f"No usable segments found for speaker_id={args.speaker_id} "
+            f"(each segment must be >= {MINIMUM_SEGMENT_SECONDS}s with valid timestamps)."
+        )
+    max_seconds = getattr(args, "max_seconds", None)
+    use_best = getattr(args, "best_segments", False)
+    if max_seconds is not None and max_seconds > 0:
+        if use_best:
+            # Pick the clearest-speech segments by energy so the limited
+            # playback budget is spent on actual talking, not faint/paused
+            # stretches. Then restore chronological order for playback.
+            scored = rank_ranges_by_energy(audio_path, ranges)
+            if scored:
+                cap = float(max_seconds)
+                chosen: List[Tuple[float, float]] = []
+                accumulated = 0.0
+                for start, end, _rms in scored:
+                    remaining = cap - accumulated
+                    if remaining <= 0:
+                        break
+                    duration = end - start
+                    if duration <= remaining:
+                        chosen.append((start, end))
+                        accumulated += duration
+                    else:
+                        chosen.append((start, start + remaining))
+                        accumulated += remaining
+                        break
+                chosen.sort(key=lambda r: r[0])
+                ranges = chosen
+        else:
+            ranges = cap_ranges_by_duration(ranges, float(max_seconds))
+    total = concatenate_wav_segments(audio_path, ranges, Path(args.out))
+    applied_gain = 1.0
+    if getattr(args, "normalize", False):
+        try:
+            applied_gain = normalize_wav_file(
+                Path(args.out), target_dbfs=float(getattr(args, "target_loudness", -19.0) or -19.0)
+            )
+        except Exception:
+            # Normalization is a best-effort playback nicety; never let a
+            # failure here abort the concatenate (the raw clip is still valid).
+            applied_gain = 1.0
+    _write_json(
+        {
+            "speakerId": args.speaker_id,
+            "outputPath": args.out,
+            "segmentCount": len(ranges),
+            "durationSeconds": round(total, 3),
+            "normalizedGain": round(applied_gain, 3),
+            "status": "ok",
+        },
+        args.json,
+    )
+    return 0
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python3 -m stt_vibevoice.speaker_id",
@@ -512,6 +749,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
     match_parser.add_argument("--margin", type=float, default=0.05, help="Minimum margin over runner-up.")
     match_parser.add_argument("--json", help="Path to write JSON result (also printed to stdout).")
     match_parser.set_defaults(func=_cmd_match)
+
+    concat_parser = subparsers.add_parser(
+        "concatenate",
+        help="Build a playable WAV from one speaker's diarized segments (no ML).",
+    )
+    concat_parser.add_argument("--audio", required=True, help="Path to source audio (WAV).")
+    concat_parser.add_argument("--segments", required=True, help="Path to transcript JSON with diarized segments.")
+    concat_parser.add_argument("--speaker-id", required=True, help="Diarized speaker id to extract.")
+    concat_parser.add_argument("--out", required=True, help="Path to write the concatenated speaker WAV.")
+    concat_parser.add_argument("--max-seconds", type=float, default=None, help="Cap total duration by truncating ranges (0/unset = all speech).")
+    concat_parser.add_argument("--best-segments", dest="best_segments", action="store_true", default=True, help="Pick the clearest-speech segments by energy (default on; use --no-best-segments to keep chronological order).")
+    concat_parser.add_argument("--no-best-segments", dest="best_segments", action="store_false", help="Keep segments in chronological order instead of ranking by energy.")
+    concat_parser.add_argument("--normalize", action="store_true", help="Apply perceptual speech-loudness normalization so quiet tracks (e.g. system-audio taps) play as loud as mic tracks.")
+    concat_parser.add_argument("--target-loudness", type=float, default=-19.0, help="Target loudness in dBFS for --normalize (default -19.0).")
+    concat_parser.add_argument("--json", help="Path to write JSON result (also printed to stdout).")
+    concat_parser.set_defaults(func=_cmd_concatenate)
 
     return parser
 

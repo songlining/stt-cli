@@ -107,6 +107,157 @@ func runChecks() throws {
     try checkEqual(pipeline.pythonBackend, "/tmp/backend", "pipeline python backend parses")
     try check(pipeline.requireBackendReady, "pipeline require-backend-ready parses")
 
+    let diarize = try Diarize.parse([
+        "--audio", "meeting.wav",
+        "--transcript", "transcript.json",
+        "--provider", "speechbrain",
+        "--num-speakers", "3",
+        "--min-speech-seconds", "1.5",
+        "--python-backend", "/tmp/backend"
+    ])
+    try checkEqual(diarize.audio, "meeting.wav", "diarize audio parses")
+    try checkEqual(diarize.transcript, "transcript.json", "diarize transcript parses")
+    try checkEqual(diarize.provider, "speechbrain", "diarize provider parses")
+    try checkEqual(diarize.numSpeakers, 3, "diarize num-speakers parses")
+    try checkEqual(diarize.minSpeechSeconds, 1.5, "diarize min-speech-seconds parses")
+    try checkEqual(diarize.pythonBackend, "/tmp/backend", "diarize python backend parses")
+    do {
+        _ = try Diarize.parse(["--audio", "a.wav", "--transcript", "t.json", "--num-speakers", "2", "--distance-threshold", "0.2"])
+        throw CheckFailure(message: "diarize mutually exclusive flags should be rejected")
+    } catch {
+        // Expected: argparse rejects mutually exclusive flags.
+    }
+
+    // DiarizationResult JSON decoding.
+    let diarizeJSON = """
+    {"distanceThreshold":0.15,"embeddingModel":"ecapa","model":"ecapa","numSpeakers":2,"provider":"speechbrain","segments":[{"duration":2.0,"end_time":2.0,"speaker_id":"0","start_time":0.0,"text":"hi"},{"duration":2.0,"end_time":4.0,"speaker_id":"1","start_time":2.0,"text":"there"}],"speakers":[{"id":"0","segmentCount":1,"totalSpeechSeconds":2.0},{"id":"1","segmentCount":1,"totalSpeechSeconds":2.0}]}
+    """.data(using: .utf8)!
+    let diarizeResult = try JSONDecoder().decode(DiarizationResult.self, from: diarizeJSON)
+    try checkEqual(diarizeResult.numSpeakers, 2, "diarization result numSpeakers decodes")
+    try checkEqual(diarizeResult.segments.map(\.speakerID), ["0", "1"], "diarization speaker ids decode as strings")
+    try checkEqual(diarizeResult.speakers[0].id, "0", "diarization speaker summary id decodes")
+
+    // Pure write-back by index preserves other fields and applies speaker ids.
+    let writeBackTranscript = TranscriptJSON(
+        audioFile: "meeting.wav",
+        backend: "vibevoice",
+        durationSeconds: 4.0,
+        text: "hi there",
+        segments: [
+            TranscriptSegment(text: "hi", startTime: 0, endTime: 2, duration: 2.0, speakerID: nil),
+            TranscriptSegment(text: "there", startTime: 2, endTime: 4, duration: 2.0, speakerID: nil)
+        ]
+    )
+    let writeBackResult = DiarizationResult(
+        provider: "speechbrain",
+        model: "ecapa",
+        embeddingModel: "ecapa",
+        numSpeakers: 2,
+        distanceThreshold: 0.15,
+        segments: [
+            DiarizationSegment(text: "hi", startTime: 0, endTime: 2, duration: 2.0, speakerID: "0"),
+            DiarizationSegment(text: "there", startTime: 2, endTime: 4, duration: 2.0, speakerID: "1")
+        ],
+        speakers: []
+    )
+    let applied = try TranscriptMerger.applyDiarizedSpeakerIDs(writeBackTranscript, result: writeBackResult)
+    try checkEqual(applied.segments.map(\.speakerID), ["0", "1"], "write-back applies speaker ids in order")
+    try checkEqual(applied.audioFile, "meeting.wav", "write-back preserves audio_file")
+    try checkEqual(applied.backend, "vibevoice", "write-back preserves backend")
+    try checkEqual(applied.text, "hi there", "write-back preserves text")
+    // Count mismatch must throw.
+    let shortResult = DiarizationResult(provider: "p", model: nil, embeddingModel: nil, numSpeakers: 1, distanceThreshold: nil, segments: [DiarizationSegment(text: "hi", startTime: 0, endTime: 1, duration: 1.0, speakerID: "0")], speakers: [])
+    do {
+        _ = try TranscriptMerger.applyDiarizedSpeakerIDs(writeBackTranscript, result: shortResult)
+        throw CheckFailure(message: "write-back count mismatch should throw")
+    } catch {
+        // Expected.
+    }
+
+    // MARK: - applyDiarizationToFile round-trip (read -> apply -> write -> read)
+    let applyFileDir = FileManager.default.temporaryDirectory.appendingPathComponent("stt-checks-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: applyFileDir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: applyFileDir) }
+    let applyFileURL = applyFileDir.appendingPathComponent("transcript.json")
+    let applyFileTranscript = TranscriptJSON(
+        audioFile: "roundtrip.wav",
+        backend: "vibevoice",
+        durationSeconds: 6.0,
+        text: "one two",
+        segments: [
+            TranscriptSegment(text: "one", startTime: 0, endTime: 3, duration: 3.0, speakerID: nil),
+            TranscriptSegment(text: "two", startTime: 3, endTime: 6, duration: 3.0, speakerID: nil)
+        ]
+    )
+    let applyFileEncoder = JSONEncoder()
+    applyFileEncoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    try applyFileEncoder.encode(applyFileTranscript).write(to: applyFileURL)
+    let applyFileResult = DiarizationResult(
+        provider: "speechbrain",
+        model: "ecapa",
+        embeddingModel: "ecapa",
+        numSpeakers: 2,
+        distanceThreshold: nil,
+        segments: [
+            DiarizationSegment(text: "one", startTime: 0, endTime: 3, duration: 3.0, speakerID: "5"),
+            DiarizationSegment(text: "two", startTime: 3, endTime: 6, duration: 3.0, speakerID: "6")
+        ],
+        speakers: [
+            DiarizationSpeakerSummary(id: "5", segmentCount: 1, totalSpeechSeconds: 3.0),
+            DiarizationSpeakerSummary(id: "6", segmentCount: 1, totalSpeechSeconds: 3.0)
+        ]
+    )
+    try TranscriptMerger.applyDiarizationToFile(transcriptURL: applyFileURL, result: applyFileResult)
+    let roundTripped = try JSONDecoder().decode(TranscriptJSON.self, from: Data(contentsOf: applyFileURL))
+    try checkEqual(roundTripped.segments.map(\.speakerID), ["5", "6"], "applyDiarizationToFile writes speaker ids by index")
+    try checkEqual(roundTripped.audioFile, "roundtrip.wav", "applyDiarizationToFile preserves audio_file")
+    try checkEqual(roundTripped.backend, "vibevoice", "applyDiarizationToFile preserves backend")
+    try checkEqual(roundTripped.text, "one two", "applyDiarizationToFile preserves text")
+    try checkEqual(roundTripped.segments.count, 2, "applyDiarizationToFile preserves segment count")
+
+    // MARK: - MeetingDiarizationConfig is constructable
+    let meetingDiagConfig = MeetingDiarizationConfig(provider: "mfcc-test", numSpeakers: 3, distanceThreshold: nil, workingDirectory: nil)
+    try checkEqual(meetingDiagConfig.provider, "mfcc-test", "MeetingDiarizationConfig provider")
+    try checkEqual(meetingDiagConfig.numSpeakers, 3, "MeetingDiarizationConfig numSpeakers")
+    try checkEqual(meetingDiagConfig.distanceThreshold, nil, "MeetingDiarizationConfig distanceThreshold nil")
+    try checkEqual(meetingDiagConfig.workingDirectory, nil, "MeetingDiarizationConfig workingDirectory nil")
+
+    // MARK: - transcribe-meeting --diarize CLI parsing
+    let meetingWithDiarize = try TranscribeMeeting.parse([
+        "mic.wav", "system.wav", "--diarize",
+        "--diarize-num-speakers", "2", "--diarize-provider", "mfcc-test"
+    ])
+    try check(meetingWithDiarize.diarize, "transcribe-meeting --diarize parses")
+    try checkEqual(meetingWithDiarize.diarizeNumSpeakers, 2, "transcribe-meeting --diarize-num-speakers parses")
+    try checkEqual(meetingWithDiarize.diarizeProvider, "mfcc-test", "transcribe-meeting --diarize-provider parses")
+    let meetingMutuallyExclusive = try TranscribeMeeting.parse([
+        "mic.wav", "system.wav", "--diarize-num-speakers", "2", "--diarize-distance-threshold", "0.2"
+    ])
+    do {
+        try meetingMutuallyExclusive.run()
+        throw CheckFailure(message: "transcribe-meeting mutually exclusive diarize flags should be rejected")
+    } catch {
+        try check("\(error)".contains("mutually exclusive"), "transcribe-meeting rejects mutually exclusive diarize flags")
+    }
+
+    // MARK: - pipeline --diarize CLI parsing
+    let pipelineWithDiarize = try Pipeline.parse([
+        "--mode", "meeting", "--diarize",
+        "--diarize-distance-threshold", "0.2", "--diarize-provider", "mfcc-test"
+    ])
+    try check(pipelineWithDiarize.diarize, "pipeline --diarize parses")
+    try checkEqual(pipelineWithDiarize.diarizeDistanceThreshold, 0.2, "pipeline --diarize-distance-threshold parses")
+    try checkEqual(pipelineWithDiarize.diarizeProvider, "mfcc-test", "pipeline --diarize-provider parses")
+    let pipelineMutuallyExclusive = try Pipeline.parse([
+        "--mode", "meeting", "--diarize-num-speakers", "2", "--diarize-distance-threshold", "0.2"
+    ])
+    do {
+        try pipelineMutuallyExclusive.run()
+        throw CheckFailure(message: "pipeline mutually exclusive diarize flags should be rejected")
+    } catch {
+        try check("\(error)".contains("mutually exclusive"), "pipeline rejects mutually exclusive diarize flags")
+    }
+
     let env = ["STT_HOME": "/tmp/stt-test-home"]
     try checkEqual(Paths.appSupportDirectory(environment: env).path, "/tmp/stt-test-home", "STT_HOME override works")
     try checkEqual(Paths.recordingsDirectory(environment: env).path, "/tmp/stt-test-home/recordings", "recordings dir nested")
@@ -174,6 +325,30 @@ func runChecks() throws {
     try checkEqual(header.subdata(in: 0..<4), Data("RIFF".utf8), "WAV RIFF marker")
     try checkEqual(header.subdata(in: 8..<12), Data("WAVE".utf8), "WAV WAVE marker")
     try checkEqual(WAVWriter.totalFileSize(dataSize: 1_000), 1_044, "WAV total file size")
+
+    // Crash-safe StreamingWAVWriter: the on-disk WAV header must track appended
+    // data periodically (not only on finish()), so a SIGKILLed/crashed
+    // recorder never leaves a header-only or stale-size WAV.
+    let csDir = FileManager.default.temporaryDirectory.appendingPathComponent("stt-checks-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: csDir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: csDir) }
+    let csURL = csDir.appendingPathComponent("crashsafe.wav")
+    let csWriter = try StreamingWAVWriter(url: csURL, sampleRate: 48_000, channels: 2, bitDepth: 16)
+    let chunk = Data(repeating: 0xAB, count: 1 << 16) // 64 KiB
+    var csTotal = 0
+    for _ in 0..<40 { // 2.5 MiB total, crosses the 1 MiB patch threshold
+        try csWriter.append(chunk)
+        csTotal += chunk.count
+    }
+    // Deliberately do NOT call finish(): simulate abrupt termination.
+    let csData = try Data(contentsOf: csURL)
+    try checkEqual(csData.count, 44 + csTotal, "StreamingWAVWriter append preserves total byte count before finish")
+    let csDataSize = csData.subdata(in: 40..<44).withUnsafeBytes { UInt32(littleEndian: $0.load(as: UInt32.self)) }
+    try check(csDataSize >= 1 << 20, "StreamingWAVWriter header patched mid-stream (not stale at 0)")
+    try check(csDataSize <= UInt32(csTotal), "StreamingWAVWriter patched header does not exceed bytes written")
+    let csRiff = csData.subdata(in: 4..<8).withUnsafeBytes { UInt32(littleEndian: $0.load(as: UInt32.self)) }
+    try checkEqual(csRiff, 36 + csDataSize, "StreamingWAVWriter patched RIFF chunk size is consistent")
+    try checkEqual(csData.suffix(chunk.count), chunk, "StreamingWAVWriter header patch did not truncate the data stream")
 
     let parsedWAV = try WAVPCMFile.parse(WAVPCMFile(sampleRate: 16_000, samples: [100, -100]).encodedData())
     try checkEqual(parsedWAV.samples, [100, -100], "WAV PCM parser round trip")
@@ -292,40 +467,6 @@ func runChecks() throws {
     try checkEqual(fallbackSelection.outputURLs, [fallbackMicURL, fallbackSystemURL], "meeting pipeline fallback output paths")
     try check(fallbackSelection.note?.contains("Mixed track unavailable") == true, "meeting pipeline fallback note explains mix failure")
     try check(fallbackSelection.note?.contains("transcribing mic.wav instead") == true, "meeting pipeline fallback note explains mic transcription")
-
-    let recordMixDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    defer { try? FileManager.default.removeItem(at: recordMixDir) }
-    try FileManager.default.createDirectory(at: recordMixDir, withIntermediateDirectories: true)
-    let recordMicURL = recordMixDir.appendingPathComponent("mic.wav")
-    let recordSystemURL = recordMixDir.appendingPathComponent("system.wav")
-    let recordMixedURL = recordMixDir.appendingPathComponent("mixed.wav")
-    try WAVPCMFile(sampleRate: 8_000, samples: [1_000, 2_000]).encodedData().write(to: recordMicURL)
-    try WAVPCMFile(sampleRate: 8_000, samples: [3_000]).encodedData().write(to: recordSystemURL)
-    let recordMixOutcome = Record.resolveMeetingMixOutcome(
-        micResult: RecordingResult(outputURL: recordMicURL, durationSeconds: 0.25, fileSizeBytes: 48),
-        systemResult: RecordingResult(outputURL: recordSystemURL, durationSeconds: 0.25, fileSizeBytes: 46),
-        mixedURL: recordMixedURL
-    )
-    try check(recordMixOutcome.note == nil, "meeting record mix has no fallback note on success")
-    try checkEqual(recordMixOutcome.mixedResult?.outputURL, recordMixedURL, "meeting record mix selects mixed track")
-    try check(FileManager.default.fileExists(atPath: recordMixedURL.path), "meeting record mix writes mixed file")
-
-    let recordFallbackDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    defer { try? FileManager.default.removeItem(at: recordFallbackDir) }
-    try FileManager.default.createDirectory(at: recordFallbackDir, withIntermediateDirectories: true)
-    let recordFallbackMicURL = recordFallbackDir.appendingPathComponent("mic.wav")
-    let recordFallbackSystemURL = recordFallbackDir.appendingPathComponent("system.wav")
-    let recordFallbackMixedURL = recordFallbackDir.appendingPathComponent("mixed.wav")
-    try WAVPCMFile(sampleRate: 16_000, samples: [1]).encodedData().write(to: recordFallbackMicURL)
-    try Data("not a wav".utf8).write(to: recordFallbackSystemURL)
-    let recordFallbackOutcome = Record.resolveMeetingMixOutcome(
-        micResult: RecordingResult(outputURL: recordFallbackMicURL, durationSeconds: 0.1, fileSizeBytes: 46),
-        systemResult: RecordingResult(outputURL: recordFallbackSystemURL, durationSeconds: 0.1, fileSizeBytes: 46),
-        mixedURL: recordFallbackMixedURL
-    )
-    try check(recordFallbackOutcome.mixedResult == nil, "meeting record mix fallback has no mixed result")
-    try check(recordFallbackOutcome.note?.contains("Mixed track unavailable") == true, "meeting record mix fallback note explains failure")
-    try check(recordFallbackOutcome.note?.contains("mic.wav and system.wav remain available separately") == true, "meeting record mix fallback note preserves tracks")
 
     let headerOnlyRecording = RecordingResult(
         outputURL: URL(fileURLWithPath: "/tmp/header-only.wav"),

@@ -24,7 +24,6 @@ struct CLIParsingTests {
         #expect(record.mode == .mic)
         #expect(record.output == "foo.wav")
         #expect(record.inputDevice == nil)
-        #expect(record.separateTracks == false)
         #expect(record.outputDir == nil)
     }
 
@@ -45,26 +44,10 @@ struct CLIParsingTests {
         #expect(record.failIfEmpty)
     }
 
-    @Test func recordMeetingModeWithSeparateTracksAndOutputDir() throws {
-        let record = try Record.parse(["--mode", "meeting", "--separate-tracks", "--output-dir", "session1"])
+    @Test func recordMeetingModeWithOutputDir() throws {
+        let record = try Record.parse(["--mode", "meeting", "--output-dir", "session1"])
         #expect(record.mode == .meeting)
-        #expect(record.separateTracks)
         #expect(record.outputDir == "session1")
-        #expect(record.mixMode == .balanced)
-    }
-
-    @Test func recordMixModeDefaultsToBalancedAndAcceptsRaw() throws {
-        let defaultRecord = try Record.parse(["--mode", "meeting"])
-        #expect(defaultRecord.mixMode == .balanced)
-
-        let rawRecord = try Record.parse(["--mode", "meeting", "--mix-mode", "raw"])
-        #expect(rawRecord.mixMode == .raw)
-    }
-
-    @Test func recordRejectsInvalidMixMode() {
-        #expect(throws: (any Error).self) {
-            try Record.parse(["--mode", "meeting", "--mix-mode", "bogus"])
-        }
     }
 
     @Test func recordRejectsInvalidMode() {
@@ -194,6 +177,32 @@ struct CLIParsingTests {
         #expect(transcribe.requireBackendReady)
     }
 
+    @Test func transcribeMeetingParsesDiarizeFlags() throws {
+        let transcribe = try TranscribeMeeting.parse([
+            "mic.wav", "system.wav",
+            "--diarize",
+            "--diarize-num-speakers", "2",
+            "--diarize-provider", "mfcc-test",
+            "--config", "/tmp/config.json"
+        ])
+        #expect(transcribe.diarize)
+        #expect(transcribe.diarizeNumSpeakers == 2)
+        #expect(transcribe.diarizeProvider == "mfcc-test")
+        #expect(transcribe.config == "/tmp/config.json")
+        #expect(transcribe.diarizeDistanceThreshold == nil)
+    }
+
+    @Test func transcribeMeetingRejectsMutuallyExclusiveDiarizeCountFlags() throws {
+        let transcribe = try TranscribeMeeting.parse([
+            "mic.wav", "system.wav",
+            "--diarize-num-speakers", "2",
+            "--diarize-distance-threshold", "0.2"
+        ])
+        #expect(throws: (any Error).self) {
+            try transcribe.run()
+        }
+    }
+
     @Test func pipelineParsesModeAndName() throws {
         let pipeline = try Pipeline.parse([
             "--mode", "meeting",
@@ -233,6 +242,30 @@ struct CLIParsingTests {
     @Test func pipelineMeetingTranscriptionDefaultsToSeparate() throws {
         let pipeline = try Pipeline.parse(["--mode", "meeting"])
         #expect(pipeline.meetingTranscription == .separate)
+    }
+
+    @Test func pipelineParsesDiarizeFlags() throws {
+        let pipeline = try Pipeline.parse([
+            "--mode", "meeting",
+            "--diarize",
+            "--diarize-distance-threshold", "0.2",
+            "--diarize-provider", "mfcc-test"
+        ])
+        #expect(pipeline.diarize)
+        #expect(pipeline.diarizeDistanceThreshold == 0.2)
+        #expect(pipeline.diarizeProvider == "mfcc-test")
+        #expect(pipeline.diarizeNumSpeakers == nil)
+    }
+
+    @Test func pipelineRejectsMutuallyExclusiveDiarizeCountFlags() throws {
+        let pipeline = try Pipeline.parse([
+            "--mode", "meeting",
+            "--diarize-num-speakers", "2",
+            "--diarize-distance-threshold", "0.2"
+        ])
+        #expect(throws: (any Error).self) {
+            try pipeline.run()
+        }
     }
 
     @Test func mixParsesInputsAndOptions() throws {

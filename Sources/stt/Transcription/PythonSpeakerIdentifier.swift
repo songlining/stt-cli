@@ -1,5 +1,35 @@
 import Foundation
 
+/// Result of `python -m stt_vibevoice.speaker_id concatenate`, which slices
+/// and concatenates one diarized speaker's segments into a single playable
+/// WAV (no ML). Used by the interactive `stt name-speakers` loop.
+public struct SpeakerConcatenateResult: Codable, Equatable {
+    public let speakerId: String?
+    public let outputPath: String?
+    public let segmentCount: Int
+    public let durationSeconds: Double
+    public let status: String
+    /// Linear gain applied when `--normalize` was requested (1.0 if no
+    /// normalization was applied or the input was already at/above target).
+    public let normalizedGain: Double?
+
+    public init(speakerId: String?,
+                outputPath: String?,
+                segmentCount: Int,
+                durationSeconds: Double,
+                status: String,
+                normalizedGain: Double? = nil) {
+        self.speakerId = speakerId
+        self.outputPath = outputPath
+        self.segmentCount = segmentCount
+        self.durationSeconds = durationSeconds
+        self.status = status
+        self.normalizedGain = normalizedGain
+    }
+
+    public var isOK: Bool { status == "ok" }
+}
+
 /// Result of `python -m stt_vibevoice.speaker_id extract`, for either a
 /// whole-file enrollment sample or a per-speaker segment extraction.
 public struct SpeakerExtractionResult: Codable, Equatable {
@@ -160,6 +190,69 @@ public enum PythonSpeakerIdentifier {
             workingDirectory: workingDirectory,
             timeout: timeout
         )
+    }
+
+    /// Builds a single playable WAV from one diarized speaker's segments by
+    /// invoking `python -m stt_vibevoice.speaker_id concatenate`. No ML is
+    /// involved, so this runs quickly in either Python venv. Used by the
+    /// interactive `stt name-speakers` loop to obtain a preview+enrollment
+    /// clip per speaker.
+    public static func concatenate(audioPath: String,
+                                   segmentsJSONPath: String,
+                                   speakerID: String,
+                                   outPath: String,
+                                   workingDirectory: URL?,
+                                   maxSeconds: Double? = nil,
+                                   normalize: Bool = false,
+                                   targetLoudness: Double = -19.0,
+                                   timeout: TimeInterval? = nil) throws -> SpeakerConcatenateResult {
+        guard let python = PythonTranscriber.locatePython3(preferredRuntimeRoot: workingDirectory) else {
+            throw PythonSpeakerIdentifierError.python3NotFound
+        }
+
+        let jsonOutputURL = temporaryJSONURL(prefix: "stt-speaker-concatenate-")
+        defer { try? FileManager.default.removeItem(at: jsonOutputURL) }
+
+        var arguments = [
+            "-m", "stt_vibevoice.speaker_id", "concatenate",
+            "--audio", audioPath,
+            "--segments", segmentsJSONPath,
+            "--speaker-id", speakerID,
+            "--out", outPath
+        ]
+        if let maxSeconds, maxSeconds > 0 {
+            arguments += ["--max-seconds", String(format: "%.1f", maxSeconds)]
+        }
+        if normalize {
+            arguments += ["--normalize", "--target-loudness", String(format: "%.1f", targetLoudness)]
+        }
+        arguments += ["--json", jsonOutputURL.path]
+
+        let result: ProcessResult
+        do {
+            result = try ProcessRunner.run(
+                executablePath: python,
+                arguments: arguments,
+                currentDirectory: workingDirectory,
+                timeout: timeout
+            )
+        } catch ProcessRunnerError.timedOut {
+            throw PythonSpeakerIdentifierError.timedOut(seconds: timeout ?? 0)
+        }
+
+        // `concatenate` exits non-zero (and still writes structured JSON) when
+        // the speaker has no usable segments; only treat this as a hard failure
+        // when no JSON output was produced at all.
+        guard FileManager.default.fileExists(atPath: jsonOutputURL.path) else {
+            throw PythonSpeakerIdentifierError.processFailed(exitCode: result.exitCode, stderr: result.standardError)
+        }
+
+        let data = try Data(contentsOf: jsonOutputURL)
+        do {
+            return try JSONDecoder().decode(SpeakerConcatenateResult.self, from: data)
+        } catch {
+            throw PythonSpeakerIdentifierError.invalidJSONOutput(String(data: data, encoding: .utf8) ?? "")
+        }
     }
 
     public static func buildExtractArguments(audioPath: String,

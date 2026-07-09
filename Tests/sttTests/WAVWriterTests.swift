@@ -94,4 +94,45 @@ struct WAVWriterTests {
         let dataSizeField = fileData.subdata(in: 40..<44).withUnsafeBytes { UInt32(littleEndian: $0.load(as: UInt32.self)) }
         #expect(dataSizeField == 6400)
     }
+
+    @Test func streamingWAVWriterIsCrashSafeBeforeFinish() throws {
+        // Regression test for SIGKILL/crash safety: the WAV header on disk must
+        // track appended data periodically (not only on finish()), so that a
+        // force-killed recorder never leaves a header-only or stale-size WAV
+        // that some strict decoders would read as empty/truncated.
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let fileURL = tmpDir.appendingPathComponent("crashsafe.wav")
+        let writer = try StreamingWAVWriter(url: fileURL, sampleRate: 48000, channels: 2, bitDepth: 16)
+
+        // Append well past the 1 MiB header-patch threshold so the header is
+        // rewritten in place at least once without finish() being called.
+        let chunk = Data(repeating: 0xAB, count: 1 << 16) // 64 KiB
+        var total = 0
+        for _ in 0..<40 { // 2.5 MiB total
+            try writer.append(chunk)
+            total += chunk.count
+        }
+        // Deliberately do NOT call finish(): simulate an abrupt termination.
+
+        let fileData = try Data(contentsOf: fileURL)
+        #expect(fileData.count == 44 + total)
+
+        // The header's data-size field must reflect (approximately) the bytes
+        // appended so far -- not the initial 0. It is patched on each MiB
+        // boundary, so it should be at least the last whole MiB written.
+        let dataSizeField = fileData.subdata(in: 40..<44).withUnsafeBytes { UInt32(littleEndian: $0.load(as: UInt32.self)) }
+        #expect(dataSizeField >= 1 << 20)
+        #expect(dataSizeField <= UInt32(total))
+
+        // The RIFF chunk size must be consistent with the patched data size.
+        let riffSize = fileData.subdata(in: 4..<8).withUnsafeBytes { UInt32(littleEndian: $0.load(as: UInt32.self)) }
+        #expect(riffSize == 36 + dataSizeField)
+
+        // The tail of the file must still contain the most recent samples
+        // (i.e. patching the header did not truncate the data stream).
+        #expect(fileData.suffix(chunk.count) == chunk)
+    }
 }

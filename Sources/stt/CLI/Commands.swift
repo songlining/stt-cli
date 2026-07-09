@@ -19,6 +19,8 @@ public struct STT: ParsableCommand {
             Mix.self,
             Speaker.self,
             Identify.self,
+            Diarize.self,
+            NameSpeakers.self,
             Permissions.self
         ]
     )
@@ -194,14 +196,8 @@ public struct Record: ParsableCommand {
     @Flag(name: .long, help: "Fail if the output looks header-only or contains no captured audio frames.")
     public var failIfEmpty: Bool = false
 
-    @Flag(name: .long, help: "For meeting mode, write mic and system audio to separate WAV files.")
-    public var separateTracks: Bool = false
-
-    @Option(name: .long, help: "Output directory for meeting mode (used with --separate-tracks).")
+    @Option(name: .long, help: "Output directory for meeting mode (mic.wav and system.wav are written here).")
     public var outputDir: String?
-
-    @Option(name: .long, help: "Mixing strategy for mixed.wav in meeting mode: raw or balanced (default: balanced).")
-    public var mixMode: MixModeArgument = .balanced
 
     public init() {}
 
@@ -290,14 +286,12 @@ public struct Record: ParsableCommand {
             print("System-audio track uses a named virtual input device fallback (e.g. BlackHole).")
             print("Recording meeting (mic + fallback system-audio) into \(baseDir.path)")
         }
-        if !separateTracks {
-            print("[NOTE] --separate-tracks not passed: recording mic.wav/system.wav first, then attempting mixed.wav after capture.")
-        }
+        print("[NOTE] Recording mic.wav + system.wav only. To produce a combined mixed.wav run `stt mix mic.wav system.wav --output mixed.wav` afterwards.")
         print(durationStopMessage())
 
         waitForStopTrigger(duration: duration)
 
-        let result = try recorder.stop(separateTracks: separateTracks)
+        let result = try recorder.stop()
         if let mic = result.micResult {
             print("Mic track: \(mic.outputURL.path) (\(String(format: "%.1f", mic.durationSeconds))s, \(formatFileSize(mic.fileSizeBytes)))")
             if let warning = mic.emptyAudioWarning { print(warning) }
@@ -308,42 +302,6 @@ public struct Record: ParsableCommand {
         }
         try enforceNonEmptyIfRequested(result.micResult)
         try enforceNonEmptyIfRequested(result.systemResult)
-
-        if !separateTracks, let mic = result.micResult, let system = result.systemResult {
-            let mixedURL = baseDir.appendingPathComponent("mixed.wav")
-            let mixOutcome = Self.resolveMeetingMixOutcome(micResult: mic, systemResult: system, mixedURL: mixedURL, mode: mixMode.mixMode)
-            if let mixed = mixOutcome.mixedResult {
-                print("Mixed track: \(mixed.outputURL.path) (\(String(format: "%.1f", mixed.durationSeconds))s, \(formatFileSize(mixed.fileSizeBytes)))")
-                if let warning = mixed.emptyAudioWarning { print(warning) }
-                if let driftNote = mixOutcome.driftNote { print("[NOTE] \(driftNote)") }
-                try enforceNonEmptyIfRequested(mixed)
-            } else if let note = mixOutcome.note {
-                print("[NOTE] \(note)")
-            }
-        }
-    }
-
-    public struct MeetingMixOutcome {
-        public let mixedResult: RecordingResult?
-        public let note: String?
-        public let driftNote: String?
-    }
-
-    public static func resolveMeetingMixOutcome(micResult: RecordingResult,
-                                                systemResult: RecordingResult,
-                                                mixedURL: URL,
-                                                mode: MixMode = .balanced) -> MeetingMixOutcome {
-        do {
-            let mixed = try WAVMixer.mixFiles(micResult.outputURL, systemResult.outputURL, outputURL: mixedURL, mode: mode)
-            let driftNote = WAVMixer.driftWarning(lhsURL: micResult.outputURL, rhsURL: systemResult.outputURL)
-            return MeetingMixOutcome(mixedResult: mixed, note: nil, driftNote: driftNote)
-        } catch {
-            return MeetingMixOutcome(
-                mixedResult: nil,
-                note: "Mixed track unavailable (\(error.localizedDescription)); mic.wav and system.wav remain available separately.",
-                driftNote: nil
-            )
-        }
     }
 
     private func enforceNonEmptyIfRequested(_ result: RecordingResult?) throws {
@@ -394,6 +352,16 @@ public struct Record: ParsableCommand {
             Self.retainedTimers.append(timer)
         }
         sema.wait()
+        // A stop trigger has been received (signal or duration). Recording
+        // capture is now over and teardown begins (stop recorders, then
+        // optionally mix `mixed.wav`). Teardown/mixing can take minutes for
+        // long meetings, and during that window nobody is waiting on the
+        // semaphore, so the dispatch-source handlers above would just
+        // re-signal a semaphore with no waiter -- effectively swallowing any
+        // further SIGINT/SIGTERM. Restore the default disposition for both
+        // signals so a *second* Ctrl-C/stop request terminates the process
+        // immediately instead of appearing to hang.
+        Self.restoreDefaultSignalDisposition()
     }
 
     private func installSignalHandlers(_ handler: @escaping () -> Void) {
@@ -406,7 +374,21 @@ public struct Record: ParsableCommand {
         }
     }
 
-    // Keep dispatch sources alive for the lifetime of the process.
+    /// Cancels the retained signal dispatch sources and resets SIGINT/SIGTERM
+    /// to their default disposition (terminate). Call this once capture has
+    /// ended so that the (potentially long) post-capture teardown/mix phase
+    /// can be interrupted by a second stop signal instead of hanging.
+    private static func restoreDefaultSignalDisposition() {
+        for source in retainedSignalSources {
+            source.cancel()
+        }
+        retainedSignalSources.removeAll()
+        for signalNumber in [SIGINT, SIGTERM] {
+            signal(signalNumber, SIG_DFL)
+        }
+    }
+
+    // Keep dispatch sources alive for the lifetime of the capture phase.
     nonisolated(unsafe) private static var retainedSignalSources: [DispatchSourceSignal] = []
     nonisolated(unsafe) private static var retainedTimers: [DispatchSourceTimer] = []
 }
@@ -530,6 +512,46 @@ public struct Transcribe: ParsableCommand {
 
 // MARK: - stt transcribe-meeting
 
+/// Diarisation configuration shared by `transcribe-meeting` and `pipeline`.
+/// Resolved from CLI flags before being handed to `transcribeMeeting(...)`;
+/// mic is always diarised with offset 0, system with offset = mic speaker count.
+///
+/// `workingDirectory` is the Python backend dir used for the diarisation step
+/// specifically (may differ from the ASR backend: speechbrain needs the
+/// Python 3.11 runtime venv, e.g. `runtime/`, while MLX ASR needs `python/`).
+public struct MeetingDiarizationConfig {
+    public let provider: String
+    public let numSpeakers: Int?
+    public let distanceThreshold: Double?
+    public let workingDirectory: URL?
+    public init(provider: String, numSpeakers: Int?, distanceThreshold: Double?, workingDirectory: URL?) {
+        self.provider = provider
+        self.numSpeakers = numSpeakers
+        self.distanceThreshold = distanceThreshold
+        self.workingDirectory = workingDirectory
+    }
+}
+
+/// Speaker identification configuration for `transcribe-meeting --identify`:
+/// matches each diarised speaker against enrolled profiles and relabels
+/// confident matches with real names.
+public struct MeetingIdentificationConfig {
+    public let profilesDirectory: URL
+    public let matchThreshold: Double
+    public let matchMargin: Double
+    public let workingDirectory: URL?
+    public let provider: String
+    public let minSpeechSeconds: Double
+    public init(profilesDirectory: URL, matchThreshold: Double, matchMargin: Double, workingDirectory: URL?, provider: String, minSpeechSeconds: Double) {
+        self.profilesDirectory = profilesDirectory
+        self.matchThreshold = matchThreshold
+        self.matchMargin = matchMargin
+        self.workingDirectory = workingDirectory
+        self.provider = provider
+        self.minSpeechSeconds = minSpeechSeconds
+    }
+}
+
 public struct MeetingTranscriptionResult {
     public let text: String
     public let jsonData: Data
@@ -574,6 +596,39 @@ public struct TranscribeMeeting: ParsableCommand {
     @Flag(name: .long, help: "Check backend readiness before transcribing and fail early if dependencies are missing.")
     public var requireBackendReady: Bool = false
 
+    @Flag(name: .long, help: "Diarise each track: assign Speaker 0, Speaker 1... by clustering voice embeddings.")
+    public var diarize: Bool = false
+
+    @Option(name: .long, help: "Force exactly N speakers per track.")
+    public var diarizeNumSpeakers: Int?
+
+    @Option(name: .long, help: "Cosine-distance cut for auto speaker count (default 0.15).")
+    public var diarizeDistanceThreshold: Double?
+
+    @Option(name: .long, help: "Path to stt config JSON (for speaker provider).")
+    public var config: String?
+
+    @Option(name: .long, help: "Embedding provider override.")
+    public var diarizeProvider: String?
+
+    @Option(name: .long, help: "Python backend dir for the diarisation step (speechbrain needs the Python 3.11 runtime venv, e.g. 'runtime/'; defaults to the ASR backend).")
+    public var diarizePythonBackend: String?
+
+    @Flag(name: .long, help: "After diarisation, match speakers against enrolled profiles and relabel with names.")
+    public var identify: Bool = false
+
+    @Option(name: .long, help: "Override the configured speaker profiles directory (for --identify).")
+    public var identifyProfilesDir: String?
+
+    @Option(name: .long, help: "Minimum match confidence for --identify (default 0.78).")
+    public var identifyThreshold: Double?
+
+    @Option(name: .long, help: "Minimum margin over runner-up for --identify (default 0.05).")
+    public var identifyMargin: Double?
+
+    @Option(name: .long, help: "Path to the Python backend for speaker extraction/matching (runtime/ venv).")
+    public var identifyPythonBackend: String?
+
     public init() {}
 
     public func run() throws {
@@ -583,10 +638,42 @@ public struct TranscribeMeeting: ParsableCommand {
         if let maxNewTokens, maxNewTokens <= 0 {
             throw ValidationError("--max-new-tokens must be greater than 0")
         }
+        if diarizeNumSpeakers != nil && diarizeDistanceThreshold != nil {
+            throw ValidationError("--diarize-num-speakers and --diarize-distance-threshold are mutually exclusive.")
+        }
+        if identify && !diarize {
+            throw ValidationError("--identify requires --diarize.")
+        }
 
         let workingDir = try Transcribe.resolvePythonBackendDirectory(overridePath: pythonBackend)
         if requireBackendReady {
             try Transcribe.requirePythonBackendReady(workingDirectory: workingDir, timeout: timeout)
+        }
+
+        var diarizationConfig: MeetingDiarizationConfig?
+        var identifyConfig: MeetingIdentificationConfig?
+        if diarize {
+            let sttConfig = try STTConfigLoader.load(explicitPath: config)
+            let provider = SpeakerCLISupport.resolvedProvider(cliValue: diarizeProvider, config: sttConfig)
+            // speechbrain needs the Python 3.11 runtime venv; default to the
+            // ASR backend (works for mfcc-test), override with --diarize-python-backend.
+            let diarizeBackend = try Transcribe.resolvePythonBackendDirectory(overridePath: diarizePythonBackend)
+            diarizationConfig = MeetingDiarizationConfig(
+                provider: provider,
+                numSpeakers: diarizeNumSpeakers,
+                distanceThreshold: diarizeDistanceThreshold,
+                workingDirectory: diarizeBackend
+            )
+            if identify {
+                identifyConfig = MeetingIdentificationConfig(
+                    profilesDirectory: SpeakerCLISupport.resolveProfilesDirectory(config: sttConfig, overridePath: identifyProfilesDir),
+                    matchThreshold: SpeakerCLISupport.resolvedThreshold(cliValue: identifyThreshold, config: sttConfig),
+                    matchMargin: SpeakerCLISupport.resolvedMargin(cliValue: identifyMargin, config: sttConfig),
+                    workingDirectory: try Transcribe.resolvePythonBackendDirectory(overridePath: identifyPythonBackend),
+                    provider: SpeakerCLISupport.resolvedProvider(cliValue: nil, config: sttConfig),
+                    minSpeechSeconds: SpeakerCLISupport.resolvedMinimumSpeechSeconds(cliValue: nil, config: sttConfig)
+                )
+            }
         }
 
         let result = try Self.transcribeMeeting(
@@ -598,7 +685,16 @@ public struct TranscribeMeeting: ParsableCommand {
             workingDirectory: workingDir,
             timeout: timeout,
             modelPath: model,
-            maxNewTokens: maxNewTokens
+            maxNewTokens: maxNewTokens,
+            diarize: diarize,
+            diarization: diarizationConfig,
+            identify: identify,
+            profilesDirectory: identifyConfig?.profilesDirectory,
+            matchThreshold: identifyConfig?.matchThreshold ?? 0.78,
+            matchMargin: identifyConfig?.matchMargin ?? 0.05,
+            identifyWorkingDirectory: identifyConfig?.workingDirectory,
+            identifyProvider: identifyConfig?.provider ?? "speechbrain",
+            identifyMinSpeechSeconds: identifyConfig?.minSpeechSeconds ?? 8.0
         )
         print(result.text)
     }
@@ -611,7 +707,16 @@ public struct TranscribeMeeting: ParsableCommand {
                                          workingDirectory: URL?,
                                          timeout: TimeInterval?,
                                          modelPath: String?,
-                                         maxNewTokens: Int?) throws -> MeetingTranscriptionResult {
+                                         maxNewTokens: Int?,
+                                         diarize: Bool = false,
+                                         diarization: MeetingDiarizationConfig? = nil,
+                                         identify: Bool = false,
+                                         profilesDirectory: URL? = nil,
+                                         matchThreshold: Double = 0.78,
+                                         matchMargin: Double = 0.05,
+                                         identifyWorkingDirectory: URL? = nil,
+                                         identifyProvider: String = "speechbrain",
+                                         identifyMinSpeechSeconds: Double = 8.0) throws -> MeetingTranscriptionResult {
         let micAvailable = (try? Paths.requireNonEmptyFile(micURL.path)) != nil
         let systemAvailable = (try? Paths.requireNonEmptyFile(systemURL.path)) != nil
         guard micAvailable || systemAvailable else {
@@ -646,6 +751,22 @@ public struct TranscribeMeeting: ParsableCommand {
             transcribedAudioPaths.append(micURL.path)
         }
 
+        var micSpeakerCount = 0
+        if micAvailable, diarize, let cfg = diarization {
+            do {
+                let res = try PythonDiarizer.diarize(
+                    audioPath: micURL.path, transcriptJSONPath: micJSONURL.path,
+                    provider: cfg.provider, numSpeakers: cfg.numSpeakers,
+                    distanceThreshold: cfg.distanceThreshold, minSpeechSeconds: nil,
+                    workingDirectory: cfg.workingDirectory, speakerIdOffset: 0)
+                try TranscriptMerger.applyDiarizationToFile(transcriptURL: micJSONURL, result: res)
+                micSpeakerCount = res.numSpeakers
+                print("[diarize] mic: \(res.numSpeakers) speakers")
+            } catch {
+                FileHandle.standardError.write("[diarize] WARNING: mic diarization failed (\(error)); continuing without speaker labels.\n".data(using: .utf8)!)
+            }
+        }
+
         if systemAvailable {
             let result = try PythonTranscriber.transcribe(
                 audioPath: systemURL.path,
@@ -662,12 +783,57 @@ public struct TranscribeMeeting: ParsableCommand {
             transcribedAudioPaths.append(systemURL.path)
         }
 
+        if systemAvailable, diarize, let cfg = diarization {
+            do {
+                let res = try PythonDiarizer.diarize(
+                    audioPath: systemURL.path, transcriptJSONPath: systemJSONURL.path,
+                    provider: cfg.provider, numSpeakers: cfg.numSpeakers,
+                    distanceThreshold: cfg.distanceThreshold, minSpeechSeconds: nil,
+                    workingDirectory: cfg.workingDirectory, speakerIdOffset: micSpeakerCount)
+                try TranscriptMerger.applyDiarizationToFile(transcriptURL: systemJSONURL, result: res)
+                print("[diarize] system: \(res.numSpeakers) speakers (offset \(micSpeakerCount))")
+            } catch {
+                FileHandle.standardError.write("[diarize] WARNING: system diarization failed (\(error)); continuing without speaker labels.\n".data(using: .utf8)!)
+            }
+        }
+
         let merge = try TranscriptMerger.merge(
             micJSONURL: micAvailable ? micJSONURL : nil,
             systemJSONURL: systemAvailable ? systemJSONURL : nil,
             outputTextURL: outputTextURL,
             outputJSONURL: outputJSONURL
         )
+
+        if identify, diarize, let outputJSONURL {
+            do {
+                let speakerNames = try identifySpeakersInMergedTranscript(
+                    mergedJSONURL: outputJSONURL,
+                    micJSONURL: micAvailable ? micJSONURL : nil,
+                    systemJSONURL: systemAvailable ? systemJSONURL : nil,
+                    micURL: micURL,
+                    systemURL: systemURL,
+                    profilesDirectory: profilesDirectory,
+                    provider: identifyProvider,
+                    minSpeechSeconds: identifyMinSpeechSeconds,
+                    threshold: matchThreshold,
+                    margin: matchMargin,
+                    workingDirectory: identifyWorkingDirectory
+                )
+                if !speakerNames.isEmpty {
+                    try TranscriptMerger.applySpeakerNames(
+                        transcriptURL: outputJSONURL, outputTextURL: outputTextURL,
+                        speakerNames: speakerNames)
+                    print("[identify] relabeled \(speakerNames.count) speaker(s): \(speakerNames.map { "\($0.value) (Speaker \($0.key))" }.joined(separator: ", "))")
+                } else {
+                    print("[identify] no confident speaker matches; keeping anonymous labels.")
+                }
+            } catch {
+                FileHandle.standardError.write("[identify] WARNING: speaker identification failed (\(error)); continuing with numeric labels.\n".data(using: .utf8)!)
+            }
+        } else if identify, diarize {
+            FileHandle.standardError.write("[identify] WARNING: no --json output path; cannot apply speaker names. Skipping identification.\n".data(using: .utf8)!)
+        }
+
         return MeetingTranscriptionResult(
             text: merge.text,
             jsonData: merge.jsonData,
@@ -681,6 +847,109 @@ public struct TranscribeMeeting: ParsableCommand {
         let directory = baseURL.deletingLastPathComponent()
         let stem = baseURL.deletingPathExtension().lastPathComponent
         return directory.appendingPathComponent("\(stem).\(source).\(ext)")
+    }
+
+    /// Extracts a speaker embedding for each diarised speaker in the merged
+    /// transcript, matches each against enrolled profiles, and returns a
+    /// `[speaker_id: displayName]` map containing ONLY confident matches.
+    /// Unmatched speakers are omitted (they keep their "Speaker N" label).
+    /// Returns `[:]` when no profiles are enrolled.
+    ///
+    /// Extraction runs once per speaker (expensive ML step); matching is
+    /// cheap. Speakers are processed sequentially (fine for 2–4 speakers).
+    private static func identifySpeakersInMergedTranscript(
+        mergedJSONURL: URL?,
+        micJSONURL: URL?,
+        systemJSONURL: URL?,
+        micURL: URL,
+        systemURL: URL,
+        profilesDirectory: URL?,
+        provider: String,
+        minSpeechSeconds: Double,
+        threshold: Double,
+        margin: Double,
+        workingDirectory: URL?
+    ) throws -> [String: String] {
+        guard let mergedJSONURL else { return [:] }
+        guard let profilesDirectory else { return [:] }
+
+        let store = SpeakerProfileStore(directory: profilesDirectory)
+        let profiles = try store.listProfiles()
+        guard !profiles.isEmpty else { return [:] }
+
+        // Decode the merged transcript and group segments by speaker_id,
+        // recording each speaker's first-segment source track.
+        let transcriptData = try Data(contentsOf: mergedJSONURL)
+        let transcript = try JSONDecoder().decode(TranscriptJSON.self, from: transcriptData)
+
+        var sourceBySpeaker: [String: String] = [:]
+        for segment in transcript.segments {
+            guard let speakerID = segment.speakerID else { continue }
+            if sourceBySpeaker[speakerID] == nil, let source = segment.source {
+                sourceBySpeaker[speakerID] = source
+            }
+        }
+        guard !sourceBySpeaker.isEmpty else { return [:] }
+
+        // Build one candidate per speaker: extract an embedding from that
+        // speaker's source track (filtered to their segments), then match.
+        var candidates: [SpeakerCandidateInput] = []
+        for (speakerID, source) in sourceBySpeaker.sorted(by: { $0.key < $1.key }) {
+            let sourceAudio: URL
+            let sourceJSON: URL?
+            switch source {
+            case "mic":
+                sourceAudio = micURL
+                sourceJSON = micJSONURL
+            case "system":
+                sourceAudio = systemURL
+                sourceJSON = systemJSONURL
+            default:
+                continue
+            }
+            guard let sourceJSON, FileManager.default.fileExists(atPath: sourceJSON.path) else {
+                continue
+            }
+
+            let extraction: SpeakerExtractionResult
+            do {
+                extraction = try PythonSpeakerIdentifier.extractSpeakerSegments(
+                    audioPath: sourceAudio.path,
+                    segmentsJSONPath: sourceJSON.path,
+                    speakerID: speakerID,
+                    provider: provider,
+                    minimumSpeechSeconds: minSpeechSeconds,
+                    workingDirectory: workingDirectory
+                )
+            } catch {
+                FileHandle.standardError.write("[identify] extraction failed for Speaker \(speakerID) (\(error)); skipping.\n".data(using: .utf8)!)
+                candidates.append(SpeakerCandidateInput(speakerId: speakerID, extraction: nil, matchResult: nil))
+                continue
+            }
+
+            // Matching is only meaningful with a usable embedding.
+            var matchResult: SpeakerMatchResult?
+            if extraction.isOK {
+                matchResult = try? SpeakerCLISupport.match(
+                    extraction: extraction,
+                    profiles: profiles,
+                    threshold: threshold,
+                    margin: margin,
+                    workingDirectory: workingDirectory
+                )
+            }
+            candidates.append(SpeakerCandidateInput(speakerId: speakerID, extraction: extraction, matchResult: matchResult))
+        }
+
+        let assignments = SpeakerLabelResolver.resolve(candidates: candidates, hasProfiles: !profiles.isEmpty)
+
+        // Keep only confident matches; unmatched speakers stay anonymous by
+        // being absent from the returned map.
+        var speakerNames: [String: String] = [:]
+        for (speakerID, assignment) in assignments where assignment.matchStatus == SpeakerMatchStatus.matched {
+            speakerNames[speakerID] = assignment.displayName
+        }
+        return speakerNames
     }
 }
 
@@ -728,6 +997,39 @@ public struct Pipeline: ParsableCommand {
     @Option(name: .long, help: "Meeting transcription strategy: separate transcribes mic/system independently and merges them; mixed preserves legacy single-pass mixed.wav transcription (default: separate).")
     public var meetingTranscription: MeetingTranscriptionModeArgument = .separate
 
+    @Flag(name: .long, help: "Diarise each meeting track: assign Speaker 0, Speaker 1... by clustering voice embeddings (meeting separate mode only).")
+    public var diarize: Bool = false
+
+    @Option(name: .long, help: "Force exactly N speakers per track.")
+    public var diarizeNumSpeakers: Int?
+
+    @Option(name: .long, help: "Cosine-distance cut for auto speaker count (default 0.15).")
+    public var diarizeDistanceThreshold: Double?
+
+    @Option(name: .long, help: "Path to stt config JSON (for speaker provider).")
+    public var config: String?
+
+    @Option(name: .long, help: "Embedding provider override.")
+    public var diarizeProvider: String?
+
+    @Option(name: .long, help: "Python backend dir for the diarisation step (speechbrain needs the Python 3.11 runtime venv, e.g. 'runtime/'; defaults to the ASR backend).")
+    public var diarizePythonBackend: String?
+
+    @Flag(name: .long, help: "After diarisation, match speakers against enrolled profiles and relabel with names (meeting separate mode only; requires --diarize).")
+    public var identify: Bool = false
+
+    @Option(name: .long, help: "Override the configured speaker profiles directory (for --identify).")
+    public var identifyProfilesDir: String?
+
+    @Option(name: .long, help: "Minimum match confidence for --identify (default 0.78).")
+    public var identifyThreshold: Double?
+
+    @Option(name: .long, help: "Minimum margin over runner-up for --identify (default 0.05).")
+    public var identifyMargin: Double?
+
+    @Option(name: .long, help: "Path to the Python backend for speaker extraction/matching (runtime/ venv).")
+    public var identifyPythonBackend: String?
+
     public init() {}
 
     public func run() throws {
@@ -739,6 +1041,12 @@ public struct Pipeline: ParsableCommand {
         }
         if let maxNewTokens, maxNewTokens <= 0 {
             throw ValidationError("--max-new-tokens must be greater than 0")
+        }
+        if diarizeNumSpeakers != nil && diarizeDistanceThreshold != nil {
+            throw ValidationError("--diarize-num-speakers and --diarize-distance-threshold are mutually exclusive.")
+        }
+        if identify && !diarize {
+            throw ValidationError("--identify requires --diarize.")
         }
 
         let backendDir = try Transcribe.resolvePythonBackendDirectory(overridePath: pythonBackend)
@@ -814,7 +1122,6 @@ public struct Pipeline: ParsableCommand {
             var meetingDriftNote: String?
             if mode == .meeting {
                 record.outputDir = runDir.path
-                record.separateTracks = true
             } else {
                 record.output = audioToTranscribeURL.path
             }
@@ -835,6 +1142,29 @@ public struct Pipeline: ParsableCommand {
                 switch meetingTranscription {
                 case .separate:
                     print("Transcribing meeting tracks separately: \(micURL.path) + \(systemURL.path)")
+                    var diarizationConfig: MeetingDiarizationConfig?
+                    var identifyConfig: MeetingIdentificationConfig?
+                    if diarize {
+                        let sttConfig = try STTConfigLoader.load(explicitPath: config)
+                        let provider = SpeakerCLISupport.resolvedProvider(cliValue: diarizeProvider, config: sttConfig)
+                        let diarizeBackend = try Transcribe.resolvePythonBackendDirectory(overridePath: diarizePythonBackend)
+                        diarizationConfig = MeetingDiarizationConfig(
+                            provider: provider,
+                            numSpeakers: diarizeNumSpeakers,
+                            distanceThreshold: diarizeDistanceThreshold,
+                            workingDirectory: diarizeBackend
+                        )
+                        if identify {
+                            identifyConfig = MeetingIdentificationConfig(
+                                profilesDirectory: SpeakerCLISupport.resolveProfilesDirectory(config: sttConfig, overridePath: identifyProfilesDir),
+                                matchThreshold: SpeakerCLISupport.resolvedThreshold(cliValue: identifyThreshold, config: sttConfig),
+                                matchMargin: SpeakerCLISupport.resolvedMargin(cliValue: identifyMargin, config: sttConfig),
+                                workingDirectory: try Transcribe.resolvePythonBackendDirectory(overridePath: identifyPythonBackend),
+                                provider: SpeakerCLISupport.resolvedProvider(cliValue: nil, config: sttConfig),
+                                minSpeechSeconds: SpeakerCLISupport.resolvedMinimumSpeechSeconds(cliValue: nil, config: sttConfig)
+                            )
+                        }
+                    }
                     let result = try TranscribeMeeting.transcribeMeeting(
                         micURL: micURL,
                         systemURL: systemURL,
@@ -844,7 +1174,16 @@ public struct Pipeline: ParsableCommand {
                         workingDirectory: backendDir,
                         timeout: transcribeTimeout,
                         modelPath: model,
-                        maxNewTokens: maxNewTokens
+                        maxNewTokens: maxNewTokens,
+                        diarize: diarize,
+                        diarization: diarizationConfig,
+                        identify: identify,
+                        profilesDirectory: identifyConfig?.profilesDirectory,
+                        matchThreshold: identifyConfig?.matchThreshold ?? 0.78,
+                        matchMargin: identifyConfig?.matchMargin ?? 0.05,
+                        identifyWorkingDirectory: identifyConfig?.workingDirectory,
+                        identifyProvider: identifyConfig?.provider ?? "speechbrain",
+                        identifyMinSpeechSeconds: identifyConfig?.minSpeechSeconds ?? 8.0
                     )
                     print(result.text)
                     state.transcribedAudioPath = result.transcribedAudioPaths.joined(separator: "+")
@@ -1371,6 +1710,322 @@ public struct Identify: ParsableCommand {
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             let data = try encoder.encode(assignment)
             try data.write(to: URL(fileURLWithPath: json), options: .atomic)
+        }
+    }
+}
+
+// MARK: - stt diarize
+
+public struct Diarize: ParsableCommand {
+    public static let configuration = CommandConfiguration(
+        abstract: "Diarise a transcript: assign a speaker_id to each segment by clustering per-segment embeddings."
+    )
+
+    @Option(name: .long, help: "Path to the source WAV file.")
+    public var audio: String
+
+    @Option(name: .long, help: "Path to the transcript JSON to read and update in place.")
+    public var transcript: String
+
+    @Option(name: .long, help: "Embedding provider to use (default: from config, else speechbrain).")
+    public var provider: String?
+
+    @Option(name: .long, help: "Force exactly N speakers (mutually exclusive with --distance-threshold).")
+    public var numSpeakers: Int?
+
+    @Option(name: .long, help: "Cosine-distance cut for auto speaker count (mutually exclusive with --num-speakers; default 0.15).")
+    public var distanceThreshold: Double?
+
+    @Option(name: .long, help: "Minimum speech seconds for a segment to be clustered (default 1.0).")
+    public var minSpeechSeconds: Double?
+
+    @Option(name: .long, help: "Add N to every assigned speaker id (for unifying mic/system namespaces; default 0).")
+    public var speakerIdOffset: Int?
+
+    @Option(name: .long, help: "Path to stt config JSON.")
+    public var config: String?
+
+    @Option(name: .long, help: "Path to the Python backend directory containing stt_vibevoice.")
+    public var pythonBackend: String?
+
+    public init() {}
+
+    public func run() throws {
+        guard !(numSpeakers != nil && distanceThreshold != nil) else {
+            throw ValidationError("--num-speakers and --distance-threshold are mutually exclusive.")
+        }
+
+        let sttConfig = try STTConfigLoader.load(explicitPath: config)
+        let backendDir = try Transcribe.resolvePythonBackendDirectory(overridePath: pythonBackend)
+        let providerName = SpeakerCLISupport.resolvedProvider(cliValue: provider, config: sttConfig)
+
+        let audioURL = try Paths.requireNonEmptyFile(audio)
+        let transcriptURL = try Paths.requireNonEmptyFile(transcript)
+
+        let result = try PythonDiarizer.diarize(
+            audioPath: audioURL.path,
+            transcriptJSONPath: transcriptURL.path,
+            provider: providerName,
+            numSpeakers: numSpeakers,
+            distanceThreshold: distanceThreshold,
+            minSpeechSeconds: minSpeechSeconds,
+            workingDirectory: backendDir,
+            speakerIdOffset: speakerIdOffset ?? 0
+        )
+
+        // Load the existing transcript, copy diarized speaker ids back by index,
+        // and write it back in place preserving all top-level fields.
+        try TranscriptMerger.applyDiarizationToFile(transcriptURL: transcriptURL, result: result)
+
+        print("Diarized \(result.numSpeakers) speakers:")
+        for speaker in result.speakers {
+            print("[\(speaker.id)] \(speaker.segmentCount) segments, \(String(format: "%.3f", speaker.totalSpeechSeconds))s speech")
+        }
+    }
+}
+
+// MARK: - stt name-speakers
+
+/// Interactive human-in-the-loop speaker labeling for a diarised transcript.
+///
+/// For each detected speaker this plays a short sample of their voice, prompts
+/// for a name, and enrolls a `SpeakerProfile` from their concatenated speech.
+/// This is the labeling step between diarisation (`stt diarize`) and matching
+/// (`stt identify`).
+public struct NameSpeakers: ParsableCommand {
+    public static let configuration = CommandConfiguration(
+        commandName: "name-speakers",
+        abstract: "Interactively name and enroll each speaker in a diarised transcript."
+    )
+
+    @Option(name: .long, help: "Path to the diarised merged transcript JSON (segments with speaker_id + source).")
+    public var transcript: String
+
+    @Option(name: .long, help: "Path to the mic-track source WAV (for speakers whose source is \"mic\").")
+    public var mic: String?
+
+    @Option(name: .long, help: "Path to the system-track source WAV (for speakers whose source is \"system\").")
+    public var system: String?
+
+    @Option(name: .long, help: "Embedding provider to use (default: from config, else speechbrain).")
+    public var provider: String?
+
+    @Option(name: .long, help: "How many seconds of audio to play per speaker (default 12).")
+    public var previewSeconds: Double = 12
+
+    @Option(name: .long, help: "Cap the enrolled sample clip to this many seconds of speech (default 60; 0 = all).")
+    public var sampleSeconds: Double = 60
+
+    @Option(name: .long, help: "Minimum total speech seconds required to enroll a speaker (default: from config, else 8.0).")
+    public var minimumSpeechSeconds: Double?
+
+    @Flag(name: .long, help: "Play and prompt but do not save profiles (dry run).")
+    public var noEnroll: Bool = false
+
+    @Flag(name: .long, help: "Disable loudness normalization of preview clips (on by default so quiet system-audio tracks play as loud as mic).")
+    public var noNormalize: Bool = false
+
+    @Option(name: .long, help: "Path to stt config JSON.")
+    public var config: String?
+
+    @Option(name: .long, help: "Override the configured speaker profiles directory.")
+    public var profilesDir: String?
+
+    @Option(name: .long, help: "Path to the Python backend directory containing stt_vibevoice.")
+    public var pythonBackend: String?
+
+    public init() {}
+
+    public func run() throws {
+        let sttConfig = try STTConfigLoader.load(explicitPath: config)
+        let profilesDirectory = SpeakerCLISupport.resolveProfilesDirectory(config: sttConfig, overridePath: profilesDir)
+        let store = SpeakerProfileStore(directory: profilesDirectory)
+        let backendDir = try Transcribe.resolvePythonBackendDirectory(overridePath: pythonBackend)
+        let providerName = SpeakerCLISupport.resolvedProvider(cliValue: provider, config: sttConfig)
+        let minSeconds = SpeakerCLISupport.resolvedMinimumSpeechSeconds(cliValue: minimumSpeechSeconds, config: sttConfig)
+
+        let transcriptURL = try Paths.requireNonEmptyFile(transcript)
+
+        let micURL: URL? = mic.flatMap { try? Paths.requireNonEmptyFile($0) }
+        let systemURL: URL? = system.flatMap { try? Paths.requireNonEmptyFile($0) }
+
+        // Decode the transcript and group segments by speaker_id.
+        let transcriptData = try Data(contentsOf: transcriptURL)
+        let transcriptJSON = try JSONDecoder().decode(TranscriptJSON.self, from: transcriptData)
+
+        // Tally per-speaker speech seconds and track the source track of each
+        // speaker's first segment (speakers do not cross mic/system tracks).
+        var speechSecondsBySpeaker: [String: Double] = [:]
+        var sourceBySpeaker: [String: String] = [:]
+        for segment in transcriptJSON.segments {
+            guard let speakerID = segment.speakerID else { continue }
+            speechSecondsBySpeaker[speakerID, default: 0] += max(0, segment.endTime - segment.startTime)
+            if sourceBySpeaker[speakerID] == nil, let source = segment.source {
+                sourceBySpeaker[speakerID] = source
+            }
+        }
+
+        // Most speech first so the dominant speakers get named first.
+        let speakers = speechSecondsBySpeaker.keys.sorted { lhs, rhs in
+            let lhsSeconds = speechSecondsBySpeaker[lhs] ?? 0
+            let rhsSeconds = speechSecondsBySpeaker[rhs] ?? 0
+            if lhsSeconds != rhsSeconds { return lhsSeconds > rhsSeconds }
+            return lhs < rhs
+        }
+
+        guard !speakers.isEmpty else {
+            print("No speakers with speaker_id found in \(transcript); run `stt diarize` first.")
+            return
+        }
+
+        let summary = speakers.map { speakerID -> String in
+            let seconds = speechSecondsBySpeaker[speakerID] ?? 0
+            let source = sourceBySpeaker[speakerID] ?? "unknown"
+            return "Speaker \(speakerID) (\(source), \(Int(seconds.rounded()))s)"
+        }.joined(separator: ", ")
+        print("Found \(speakers.count) speakers: \(summary)")
+
+        var enrolledCount = 0
+        var skippedCount = 0
+
+        for speakerID in speakers {
+            let source = sourceBySpeaker[speakerID] ?? "unknown"
+            let sourceWavURL: URL? = source == "mic" ? micURL : (source == "system" ? systemURL : nil)
+
+            guard let sourceWavURL else {
+                print("Skipping Speaker \(speakerID): --mic/--system not provided (source=\(source)).")
+                skippedCount += 1
+                continue
+            }
+
+            // Build a playable clip of this speaker's concatenated speech
+            // (fast; no ML) via the python `concatenate` subcommand.
+            let clipDir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("stt-name-speakers-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: clipDir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: clipDir) }
+
+            let clipURL = clipDir.appendingPathComponent("speaker-\(speakerID).wav")
+
+            let concat: SpeakerConcatenateResult
+            do {
+                concat = try PythonSpeakerIdentifier.concatenate(
+                    audioPath: sourceWavURL.path,
+                    segmentsJSONPath: transcriptURL.path,
+                    speakerID: speakerID,
+                    outPath: clipURL.path,
+                    workingDirectory: backendDir,
+                    maxSeconds: sampleSeconds,
+                    normalize: !noNormalize
+                )
+            } catch {
+                print("Speaker \(speakerID): no usable speech segments, skipping.")
+                skippedCount += 1
+                continue
+            }
+
+            // Interactive play -> name loop (allows replay).
+            var chosenName: String?
+            speakerLoop: while true {
+                print("\nSpeaker \(speakerID) (\(source), \(String(format: "%.0f", concat.durationSeconds))s, \(concat.segmentCount) segments)")
+                print("Playing \(String(format: "%.0f", previewSeconds))s sample...")
+                Self.playAudioSample(at: clipURL.path, seconds: previewSeconds)
+                print("[name] enroll as  |  [r] replay  |  [s] skip")
+                guard let line = readLine()?.trimmingCharacters(in: .whitespaces), !line.isEmpty else {
+                    print("Skipping Speaker \(speakerID) (no name given).")
+                    break speakerLoop
+                }
+                let normalized = line.lowercased()
+                if normalized == "s" || normalized == "skip" {
+                    print("Skipping Speaker \(speakerID).")
+                    break speakerLoop
+                } else if normalized == "r" || normalized == "replay" {
+                    continue speakerLoop
+                } else {
+                    chosenName = line
+                    break speakerLoop
+                }
+            }
+
+            guard let name = chosenName else {
+                skippedCount += 1
+                continue
+            }
+
+            // A profile with this name already exists: do not overwrite.
+            let existing = try? store.findByName(name)
+            if existing != nil {
+                print("Speaker \"\(name)\" already enrolled; skipping enrollment (use `stt speaker remove` first to replace).")
+                skippedCount += 1
+                continue
+            }
+
+            if noEnroll {
+                print("Would enroll \"\(name)\" from \(String(format: "%.0f", concat.durationSeconds))s of speech.")
+                enrolledCount += 1
+                continue
+            }
+
+            // Extract the embedding from this speaker's speech (ML step).
+            let extraction = try PythonSpeakerIdentifier.extractSpeakerSegments(
+                audioPath: sourceWavURL.path,
+                segmentsJSONPath: transcriptURL.path,
+                speakerID: speakerID,
+                provider: providerName,
+                minimumSpeechSeconds: minSeconds,
+                workingDirectory: backendDir
+            )
+            guard extraction.isOK, let embedding = extraction.embedding, let model = extraction.model else {
+                print("Speaker \(speakerID): extraction failed (only \(String(format: "%.0f", concat.durationSeconds))s usable); skipping.")
+                skippedCount += 1
+                continue
+            }
+
+            // Copy the playable clip into the profile's sample directory and
+            // build a fresh profile (new id; never replace semantics).
+            let profileID = UUID()
+            let sampleDirectory = store.sampleDirectory(forProfileID: profileID)
+            try Paths.ensureDirectoryExists(sampleDirectory)
+            let sampleFileName = "\(Paths.timestampToken()).wav"
+            let destinationSampleURL = sampleDirectory.appendingPathComponent(sampleFileName)
+            try? FileManager.default.removeItem(at: destinationSampleURL)
+            try FileManager.default.copyItem(at: clipURL, to: destinationSampleURL)
+            let relativeSamplePath = "samples/\(profileID.uuidString)/\(sampleFileName)"
+
+            let now = Date()
+            let profile = SpeakerProfile(
+                id: profileID,
+                displayName: name,
+                createdAt: now,
+                updatedAt: now,
+                embeddingProvider: providerName,
+                embeddingModel: model,
+                embedding: embedding,
+                samplePaths: [relativeSamplePath],
+                sampleDurationSeconds: extraction.durationSeconds
+            )
+            try store.save(profile)
+
+            print("Enrolled \"\(name)\" from \(String(format: "%.0f", concat.durationSeconds))s of speech (\(concat.segmentCount) segments).")
+            enrolledCount += 1
+        }
+
+        print("\nDone: \(enrolledCount) enrolled, \(skippedCount) skipped.")
+    }
+
+    /// Plays the first `seconds` seconds of the sample at `path` using the
+    /// system `afplay` tool. Failures (e.g. no audio device or afplay missing)
+    /// print a warning with the clip path but never abort the command, so the
+    /// user can still name/enroll a speaker without hearing the preview.
+    private static func playAudioSample(at path: String, seconds: Double) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/afplay")
+        process.arguments = ["-t", String(format: "%.0f", seconds), path]
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            print("[warn] could not play sample (\(error.localizedDescription)). Clip is at: \(path)")
         }
     }
 }
