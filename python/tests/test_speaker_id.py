@@ -1590,3 +1590,250 @@ class TestExtractRangeIntegration:
         assert payload["requestedRanges"] is None
         # JSON round-trip converts tuples to lists.
         assert payload["selectedRanges"] == [[0.0, 12.0]]
+
+
+class TestLabelSuggestions:
+    """Unit tests for the pure, I/O-free label-suggestion grouping logic.
+
+    These build precomputed ``match_candidate``-shaped results directly (no
+    audio files, no ML backend, no profiles directory, no transcript
+    mutation) and assert on ``build_label_suggestions`` output.
+    """
+
+    def _profile(self, profile_id, display_name=None):
+        return {
+            "id": profile_id,
+            "displayName": display_name or f"Person {profile_id}",
+            "embeddingProvider": "mfcc-test",
+            "embeddingModel": "stt-vibevoice/mfcc-test-v1",
+            "embedding": [1.0, 0.0],
+        }
+
+    def _best_match(self, profile_id, display_name, confidence, matched=True, status="matched", margin=0.5):
+        return {
+            "profileId": profile_id,
+            "displayName": display_name,
+            "confidence": confidence,
+            "margin": margin,
+            "matched": matched,
+            "status": status,
+        }
+
+    def _match(self, best_match):
+        return {
+            "bestMatch": best_match,
+            "candidates": [],
+            "skippedProfiles": [],
+            "warnings": [],
+        }
+
+    def _cluster(self, speaker_id, best_match, *, window_matches=None, source="system", **meta):
+        cluster = {
+            "speakerId": speaker_id,
+            "source": source,
+            "match": self._match(best_match),
+        }
+        cluster.update(meta)
+        if window_matches is not None:
+            cluster["windowMatches"] = window_matches
+        return cluster
+
+    def test_no_profiles_returns_no_profiles_result(self):
+        cluster = self._cluster("0", self._best_match("a", "Person a", 0.9))
+        result = speaker_id.build_label_suggestions(
+            [cluster], profiles=[], threshold=0.78, margin=0.05
+        )
+        assert result["status"] == "no_profiles"
+        assert result["profilesConsidered"] == {"count": 0, "profileIds": []}
+        assert result["clusters"] == []
+        assert result["duplicateClusterGroups"] == []
+        assert result["mixedClusterWarnings"] == []
+        # No profiles means everything is reported as unmatched.
+        assert result["summary"] == {
+            "clusterCount": 1,
+            "matchedCount": 0,
+            "duplicateGroupCount": 0,
+            "mixedClusterCount": 0,
+            "unmatchedCount": 1,
+        }
+        # Machine-readable + explanatory.
+        assert isinstance(result["recommendation"], str)
+        assert result["schemaVersion"] == speaker_id.LABEL_SUGGESTIONS_SCHEMA_VERSION
+
+    def test_one_confident_match_produces_reuse_profile_recommendation(self):
+        profiles = [self._profile("a", "Alice")]
+        cluster = self._cluster(
+            "0",
+            self._best_match("a", "Alice", 0.95),
+            durationSeconds=12.0,
+            segmentCount=3,
+            selectedRanges=[[0.0, 4.0], [6.0, 8.0]],
+            speechSeconds=6.0,
+        )
+        result = speaker_id.build_label_suggestions(
+            [cluster], profiles=profiles, threshold=0.78, margin=0.05
+        )
+        assert result["status"] == "ok"
+        assert len(result["clusters"]) == 1
+        c = result["clusters"][0]
+        assert c["speakerId"] == "0"
+        assert c["recommendation"] == "reuse_profile"
+        assert c["bestMatch"]["profileId"] == "a"
+        # Cluster metadata is echoed.
+        assert c["durationSeconds"] == 12.0
+        assert c["segmentCount"] == 3
+        assert c["selectedRanges"] == [[0.0, 4.0], [6.0, 8.0]]
+        assert c["speechSeconds"] == 6.0
+        # A single confident match is NOT a duplicate group.
+        assert result["duplicateClusterGroups"] == []
+        assert result["mixedClusterWarnings"] == []
+        assert result["summary"]["matchedCount"] == 1
+        assert result["summary"]["unmatchedCount"] == 0
+        assert result["summary"]["duplicateGroupCount"] == 0
+
+    def test_two_clusters_same_profile_produce_one_duplicate_group(self):
+        profiles = [self._profile("a", "Alice")]
+        clusters = [
+            self._cluster("1", self._best_match("a", "Alice", 0.95), selectedRanges=[[0.0, 4.0]]),
+            self._cluster("2", self._best_match("a", "Alice", 0.92), selectedRanges=[[8.0, 12.0]]),
+        ]
+        result = speaker_id.build_label_suggestions(
+            clusters, profiles=profiles, threshold=0.78, margin=0.05
+        )
+        groups = result["duplicateClusterGroups"]
+        assert len(groups) == 1
+        group = groups[0]
+        assert group["profileId"] == "a"
+        assert group["nameHint"] == "Alice"
+        assert group["displayName"] == "Alice"
+        assert group["recommendation"] == "merge_or_relabel"
+        # Both clusters are listed, with confidence values, sorted by speakerId.
+        member_ids = [m["speakerId"] for m in group["clusters"]]
+        assert member_ids == ["1", "2"]
+        confidences = {m["speakerId"]: m["confidence"] for m in group["clusters"]}
+        assert confidences["1"] == 0.95
+        assert confidences["2"] == 0.92
+        assert result["summary"]["duplicateGroupCount"] == 1
+        assert result["summary"]["matchedCount"] == 2
+
+    def test_clusters_matching_different_profiles_do_not_duplicate_group(self):
+        # Two clusters confidently matching *different* profiles are NOT a
+        # duplicate group -- they are simply two good distinct matches.
+        profiles = [self._profile("a", "Alice"), self._profile("b", "Bob")]
+        clusters = [
+            self._cluster("1", self._best_match("a", "Alice", 0.95)),
+            self._cluster("2", self._best_match("b", "Bob", 0.93)),
+        ]
+        result = speaker_id.build_label_suggestions(
+            clusters, profiles=profiles, threshold=0.78, margin=0.05
+        )
+        assert result["duplicateClusterGroups"] == []
+        assert result["summary"]["matchedCount"] == 2
+
+    def test_windows_matching_different_profiles_produce_mixed_warning(self):
+        profiles = [self._profile("a", "Alice"), self._profile("b", "Bob")]
+        window_matches = [
+            {
+                "label": "early",
+                "range": [0.0, 6.0],
+                "match": self._match(self._best_match("a", "Alice", 0.95)),
+            },
+            {
+                "label": "late",
+                "range": [10.0, 16.0],
+                "match": self._match(self._best_match("b", "Bob", 0.93)),
+            },
+        ]
+        cluster = self._cluster("0", None, window_matches=window_matches)
+        result = speaker_id.build_label_suggestions(
+            [cluster], profiles=profiles, threshold=0.78, margin=0.05
+        )
+        warnings = result["mixedClusterWarnings"]
+        assert len(warnings) == 1
+        w = warnings[0]
+        assert w["speakerId"] == "0"
+        assert w["conflictingProfileIds"] == ["a", "b"]
+        assert w["conflictingDisplayNames"] == ["Alice", "Bob"]
+        assert w["recommendation"] == "do_not_enroll_whole_cluster"
+        # Window evidence is preserved.
+        assert len(w["windows"]) == 2
+        assert w["windows"][0]["matchedProfileId"] == "a"
+        assert w["windows"][1]["matchedProfileId"] == "b"
+        assert result["summary"]["mixedClusterCount"] == 1
+
+    def test_windows_matching_same_profile_do_not_warn(self):
+        profiles = [self._profile("a", "Alice")]
+        window_matches = [
+            {"label": "early", "range": [0.0, 6.0],
+             "match": self._match(self._best_match("a", "Alice", 0.95))},
+            {"label": "late", "range": [10.0, 16.0],
+             "match": self._match(self._best_match("a", "Alice", 0.94))},
+        ]
+        cluster = self._cluster("0", self._best_match("a", "Alice", 0.95), window_matches=window_matches)
+        result = speaker_id.build_label_suggestions(
+            [cluster], profiles=profiles, threshold=0.78, margin=0.05
+        )
+        assert result["mixedClusterWarnings"] == []
+
+    def test_output_ordering_is_deterministic_for_unsorted_input(self):
+        # Feed clusters out of speakerId order; output must be sorted.
+        profiles = [
+            self._profile("z", "Zed"),
+            self._profile("a", "Alice"),
+        ]
+        clusters = [
+            self._cluster("3", self._best_match("a", "Alice", 0.95)),
+            self._cluster("1", self._best_match("a", "Alice", 0.94)),
+            self._cluster("2", self._best_match("z", "Zed", 0.90)),
+        ]
+        result = speaker_id.build_label_suggestions(
+            clusters, profiles=profiles, threshold=0.78, margin=0.05
+        )
+        # Cluster suggestions sorted by speakerId.
+        assert [c["speakerId"] for c in result["clusters"]] == ["1", "2", "3"]
+        # Duplicate group for profile 'a' lists members sorted by speakerId.
+        group = result["duplicateClusterGroups"][0]
+        assert group["profileId"] == "a"
+        assert [m["speakerId"] for m in group["clusters"]] == ["1", "3"]
+        # Duplicate groups sorted by profileId ('a' before 'z' is irrelevant
+        # here since only 'a' has 2+ members, but profilesConsidered is sorted).
+        assert result["profilesConsidered"]["profileIds"] == ["z", "a"]
+
+    def test_below_threshold_best_match_is_not_confident(self):
+        # ``matched: False`` (below threshold / ambiguous) must not count as a
+        # confident match even though bestMatch is present.
+        profiles = [self._profile("a", "Alice"), self._profile("b", "Bob")]
+        cluster = self._cluster(
+            "0", self._best_match("a", "Alice", 0.6, matched=False, status="below_threshold")
+        )
+        result = speaker_id.build_label_suggestions(
+            [cluster], profiles=profiles, threshold=0.78, margin=0.05
+        )
+        c = result["clusters"][0]
+        assert c["recommendation"] == "no_confident_match"
+        assert result["duplicateClusterGroups"] == []
+        assert result["summary"]["matchedCount"] == 0
+        assert result["summary"]["unmatchedCount"] == 1
+
+    def test_config_and_provenance_are_echoed(self):
+        profiles = [self._profile("a", "Alice")]
+        cluster = self._cluster("0", self._best_match("a", "Alice", 0.95))
+        result = speaker_id.build_label_suggestions(
+            [cluster],
+            profiles=profiles,
+            threshold=0.82,
+            margin=0.07,
+            session="sess-123",
+            provider="speechbrain",
+            model="spkrec",
+            generated_at="2026-01-01T00:00:00+00:00",
+        )
+        assert result["config"] == {
+            "threshold": 0.82,
+            "margin": 0.07,
+            "provider": "speechbrain",
+            "model": "spkrec",
+        }
+        assert result["session"] == "sess-123"
+        assert result["generatedAt"] == "2026-01-01T00:00:00+00:00"
+        assert result["profilesConsidered"] == {"count": 1, "profileIds": ["a"]}

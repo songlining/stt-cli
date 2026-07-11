@@ -865,6 +865,320 @@ def match_candidate(
 
 
 # ---------------------------------------------------------------------------
+# Label suggestion grouping (pure, I/O-free)
+# ---------------------------------------------------------------------------
+#
+# ``build_label_suggestions`` is the pure, non-mutating core of the label
+# suggestion engine. It consumes already-computed per-cluster (and optional
+# per-window) match results produced by :func:`match_candidate` and groups
+# them into (a) per-cluster profile-match suggestions, (b) duplicate-cluster
+# candidates (multiple clusters confidently matching one profile), and (c)
+# mixed-cluster warnings (chronological windows matching different profiles).
+#
+# It performs NO filesystem, audio, ML, or transcript I/O. All extraction +
+# matching must happen upstream so this function stays unit-testable without
+# audio files, an ML backend, a profiles directory, or transcript mutation.
+
+LABEL_SUGGESTIONS_SCHEMA_VERSION = 1
+
+
+def _matched_profile_id(best_match: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Return the profile id when ``best_match`` is a confident (matched)
+    result, otherwise ``None``.
+
+    The threshold/margin gating happens inside :func:`match_candidate`: a
+    match is only ``matched`` when confidence >= threshold AND the margin over
+    the runner-up >= margin. Grouping therefore respects those flags here
+    without re-deriving them.
+    """
+    if not best_match:
+        return None
+    if not best_match.get("matched"):
+        return None
+    return best_match.get("profileId")
+
+
+def build_label_suggestions(
+    cluster_results: Sequence[Dict[str, Any]],
+    *,
+    profiles: Sequence[Dict[str, Any]],
+    threshold: float,
+    margin: float,
+    session: Optional[str] = None,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+    generated_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Group precomputed per-cluster match results into label suggestions.
+
+    Pure and I/O-free: it never reads audio, writes files, mutates the
+    transcript, or touches enrolled profiles. Callers own extraction and
+    matching; this function only *groups* their already-computed results.
+
+    Args:
+        cluster_results: One dict per diarisation cluster. Each must carry:
+
+            - ``speakerId`` (str)
+            - ``match`` (dict): the result of :func:`match_candidate` for the
+              whole-cluster embedding (keys: ``bestMatch``, ``candidates``,
+              ``skippedProfiles``, ``warnings``).
+            - Optional cluster metadata echoed into the output:
+              ``durationSeconds``, ``segmentCount``, ``selectedRanges``,
+              ``source``, ``speechSeconds``.
+            - Optional ``windowMatches`` (list): per-window match results used
+              for mixed-cluster detection. Each entry should be
+              ``{"label": str, "range": [start, end], "match": <match_candidate result>}``.
+
+        profiles: The enrolled profile list (same shape
+            :func:`match_candidate` consumes). Used here only for the
+            no-profile explanatory state and to populate
+            ``profilesConsidered``.
+        threshold/margin: The matching thresholds used to compute the ``match``
+            results. Echoed into the output ``config`` block so the artifact is
+            self-describing/reproducible.
+        session/provider/model/generated_at: Optional provenance metadata
+            echoed into the output.
+
+    Returns a deterministic dict (``schemaVersion`` 1) with a stable schema:
+
+        - ``status``: ``"ok"`` or ``"no_profiles"``.
+        - ``config``: ``{threshold, margin, provider, model}``.
+        - ``profilesConsidered``: ``{count, profileIds}``.
+        - ``clusters``: per-cluster suggestion (profile match / no match).
+        - ``duplicateClusterGroups``: clusters confidently matching the same
+          profile, grouped by profile, with a merge/reuse recommendation.
+        - ``mixedClusterWarnings``: clusters whose windows match different
+          profiles, with window-level evidence.
+        - ``summary``: aggregate counts.
+
+    The output is deterministic (sorted by speakerId / profileId) so it is
+    stable and diff-friendly for agents and tests.
+    """
+    profile_ids = [str(p.get("id")) for p in profiles if p.get("id") is not None]
+    profile_names = {
+        str(p.get("id")): p.get("displayName")
+        for p in profiles
+        if p.get("id") is not None
+    }
+
+    # ---- No-profile state: exit cleanly with an explanatory result ----
+    if not profiles:
+        return {
+            "schemaVersion": LABEL_SUGGESTIONS_SCHEMA_VERSION,
+            "status": "no_profiles",
+            "session": session,
+            "generatedAt": generated_at,
+            "config": {
+                "threshold": threshold,
+                "margin": margin,
+                "provider": provider,
+                "model": model,
+            },
+            "profilesConsidered": {"count": 0, "profileIds": []},
+            "clusters": [],
+            "duplicateClusterGroups": [],
+            "mixedClusterWarnings": [],
+            "summary": {
+                "clusterCount": len(cluster_results),
+                "matchedCount": 0,
+                "duplicateGroupCount": 0,
+                "mixedClusterCount": 0,
+                "unmatchedCount": len(cluster_results),
+            },
+            "recommendation": (
+                "No speaker profiles are enrolled yet. Enroll speakers first; "
+                "suggestions become meaningful once at least one profile exists."
+            ),
+        }
+
+    cluster_suggestions: List[Dict[str, Any]] = []
+    matched_to_profile: Dict[str, List[Dict[str, Any]]] = {}
+    mixed_warnings: List[Dict[str, Any]] = []
+
+    # Stable processing order by speakerId for deterministic output.
+    ordered = sorted(cluster_results, key=lambda c: str(c.get("speakerId", "")))
+
+    for cluster in ordered:
+        speaker_id = str(cluster.get("speakerId", ""))
+        match_result = cluster.get("match") or {}
+        best_match = match_result.get("bestMatch")
+        matched_profile_id = _matched_profile_id(best_match)
+
+        suggestion: Dict[str, Any] = {
+            "speakerId": speaker_id,
+            "source": cluster.get("source"),
+            "durationSeconds": cluster.get("durationSeconds"),
+            "segmentCount": cluster.get("segmentCount"),
+            "selectedRanges": cluster.get("selectedRanges"),
+            "speechSeconds": cluster.get("speechSeconds"),
+            "bestMatch": best_match,
+        }
+
+        if matched_profile_id is not None:
+            display_name = (
+                (best_match or {}).get("displayName")
+                or profile_names.get(matched_profile_id)
+            )
+            confidence = (best_match or {}).get("confidence")
+            suggestion["recommendation"] = "reuse_profile"
+            suggestion["recommendationDetail"] = (
+                f"Cluster {speaker_id} matches profile '{display_name}' "
+                f"({matched_profile_id}) with confidence {confidence:.4f}. "
+                f"Reuse this speaker instead of creating a new profile."
+            )
+            matched_to_profile.setdefault(matched_profile_id, []).append(
+                {
+                    "speakerId": speaker_id,
+                    "confidence": confidence,
+                    "displayName": display_name,
+                    "selectedRanges": cluster.get("selectedRanges"),
+                }
+            )
+        else:
+            status = (best_match or {}).get("status", "no_match")
+            suggestion["recommendation"] = "no_confident_match"
+            suggestion["recommendationDetail"] = (
+                f"Cluster {speaker_id} has no confident profile match "
+                f"(status: {status}). It may be a new speaker or below the "
+                f"threshold/margin gate."
+            )
+
+        cluster_suggestions.append(suggestion)
+
+        # ---- Mixed-cluster detection from per-window matches ----
+        window_matches = cluster.get("windowMatches") or []
+        conflicting = _detect_mixed_windows(window_matches)
+        if conflicting is not None:
+            mixed_warnings.append(
+                {
+                    "speakerId": speaker_id,
+                    "windows": conflicting["windows"],
+                    "conflictingProfileIds": conflicting["conflictingProfileIds"],
+                    "conflictingDisplayNames": conflicting["conflictingDisplayNames"],
+                    "recommendation": "do_not_enroll_whole_cluster",
+                    "recommendationDetail": (
+                        f"Cluster {speaker_id}'s chronological windows match "
+                        f"different profiles ({', '.join(conflicting['conflictingDisplayNames'])}). "
+                        f"Do not enroll the whole cluster as one speaker; use "
+                        f"--range to enroll a single speaker's windows."
+                    ),
+                }
+            )
+
+    # ---- Duplicate-cluster groups (>=2 clusters confidently matching one profile) ----
+    duplicate_groups: List[Dict[str, Any]] = []
+    for profile_id in sorted(matched_to_profile.keys()):
+        members = sorted(
+            matched_to_profile[profile_id], key=lambda m: str(m["speakerId"])
+        )
+        if len(members) < 2:
+            continue  # a single confident match is not a "duplicate" group
+        display_name = members[0].get("displayName") or profile_names.get(profile_id)
+        member_summaries = [
+            {
+                "speakerId": m["speakerId"],
+                "confidence": m["confidence"],
+                "selectedRanges": m.get("selectedRanges"),
+            }
+            for m in members
+        ]
+        speaker_ids = ", ".join(str(m["speakerId"]) for m in members)
+        duplicate_groups.append(
+            {
+                "profileId": profile_id,
+                "nameHint": display_name,
+                "displayName": display_name,
+                "clusters": member_summaries,
+                "recommendation": "merge_or_relabel",
+                "recommendationDetail": (
+                    f"Clusters {speaker_ids} all confidently match profile "
+                    f"'{display_name}' ({profile_id}); they are likely the same "
+                    f"speaker. Enroll or relabel only one cluster to avoid "
+                    f"creating duplicate profiles."
+                ),
+            }
+        )
+
+    matched_count = sum(
+        1 for c in cluster_suggestions if c["recommendation"] == "reuse_profile"
+    )
+
+    return {
+        "schemaVersion": LABEL_SUGGESTIONS_SCHEMA_VERSION,
+        "status": "ok",
+        "session": session,
+        "generatedAt": generated_at,
+        "config": {
+            "threshold": threshold,
+            "margin": margin,
+            "provider": provider,
+            "model": model,
+        },
+        "profilesConsidered": {
+            "count": len(profiles),
+            "profileIds": profile_ids,
+        },
+        "clusters": cluster_suggestions,
+        "duplicateClusterGroups": duplicate_groups,
+        "mixedClusterWarnings": mixed_warnings,
+        "summary": {
+            "clusterCount": len(cluster_results),
+            "matchedCount": matched_count,
+            "duplicateGroupCount": len(duplicate_groups),
+            "mixedClusterCount": len(mixed_warnings),
+            "unmatchedCount": len(cluster_results) - matched_count,
+        },
+    }
+
+
+def _detect_mixed_windows(
+    window_matches: Sequence[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Inspect per-window match results and return mixed-cluster evidence when
+    two or more windows each confidently match *different* profiles.
+
+    Returns ``None`` when there is no conflict (fewer than two confident
+    windows, or all confident windows agree on one profile). Otherwise returns
+    a dict with ``windows`` (the per-window evidence),
+    ``conflictingProfileIds``, and ``conflictingDisplayNames`` -- all sorted
+    for deterministic output.
+    """
+    evidence: List[Dict[str, Any]] = []
+    confident_profile_ids: List[str] = []
+    confident_names: List[str] = []
+    for entry in window_matches:
+        rng = entry.get("range")
+        match_result = entry.get("match") or {}
+        best_match = match_result.get("bestMatch")
+        profile_id = _matched_profile_id(best_match)
+        # Always record window-level evidence (bestMatch may be None / below
+        # threshold) so callers can inspect borderline windows.
+        evidence.append(
+            {
+                "label": entry.get("label"),
+                "range": rng,
+                "bestMatch": best_match,
+                "matchedProfileId": profile_id,
+            }
+        )
+        if profile_id is not None:
+            confident_profile_ids.append(profile_id)
+            name = (best_match or {}).get("displayName")
+            if name:
+                confident_names.append(name)
+
+    distinct = set(confident_profile_ids)
+    if len(distinct) < 2:
+        return None
+
+    return {
+        "windows": evidence,
+        "conflictingProfileIds": sorted(distinct),
+        "conflictingDisplayNames": sorted(set(confident_names)),
+    }
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
