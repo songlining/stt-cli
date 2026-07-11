@@ -645,32 +645,81 @@ def extract_speaker_segments(
     speaker_id: str,
     provider: str,
     minimum_speech_seconds: float,
+    *,
+    ranges: Optional[Sequence[Tuple[float, float]]] = None,
 ) -> Dict[str, Any]:
     """Extracts an embedding for one diarized speaker from a full recording.
 
     Concatenates all segments belonging to ``speaker_id`` (each at least
     ``MINIMUM_SEGMENT_SECONDS`` long) into a temporary WAV, then extracts an
     embedding from the concatenated speaker-only audio.
-    """
-    ranges = select_speaker_segments(segments, speaker_id)
-    total_seconds = sum(end - start for start, end in ranges)
 
-    if not ranges or total_seconds < minimum_speech_seconds:
-        return _too_short_result(speaker_id, provider, total_seconds, segment_count=len(ranges))
+    When ``ranges`` is provided (as already-parsed ``(start, end)`` tuples),
+    each matching speaker segment is *intersected* with the requested ranges,
+    clipping to segment boundaries (see ``select_speaker_segments``). Embeddings
+    are then computed only from the selected speech ranges. The returned JSON
+    includes range metadata (``requestedRanges``, ``selectedRanges``,
+    ``selectedSegmentCount``, ``selectedSpeechSeconds``) so downstream consumers
+    (audit, preview, enrollment) know exactly which speech was used.
+    """
+    # ranges arrive as already-parsed (start, end) float tuples (the CLI parses
+    # strings via parse_time_ranges before calling). Pass them straight through
+    # to select_speaker_segments which does the intersection clipping.
+    requested_ranges: Optional[List[Tuple[float, float]]] = (
+        [(float(s), float(e)) for s, e in ranges] if ranges is not None else None
+    )
+
+    # ``select_speaker_segments`` with ranges=None returns the full
+    # backward-compatible selection; passing a list (possibly empty after
+    # filtering) enables range intersection clipping.
+    selected_ranges = select_speaker_segments(
+        segments, speaker_id, ranges=requested_ranges
+    )
+    total_seconds = sum(end - start for start, end in selected_ranges)
+
+    if not selected_ranges or total_seconds < minimum_speech_seconds:
+        result = _too_short_result(
+            speaker_id, provider, total_seconds, segment_count=len(selected_ranges)
+        )
+        # Surface range metadata even for too-short results so the caller can
+        # understand *why* there was not enough speech (e.g. requested ranges
+        # that did not overlap any matching segment).
+        result.update(_range_metadata(requested_ranges, selected_ranges))
+        return result
 
     with tempfile.TemporaryDirectory(prefix="stt_speaker_id_") as tmp_dir:
         concat_path = Path(tmp_dir) / f"speaker-{speaker_id}.wav"
-        actual_seconds = concatenate_wav_segments(audio_path, ranges, concat_path)
+        actual_seconds = concatenate_wav_segments(audio_path, selected_ranges, concat_path)
         embedding, model_id = embed_audio_file(concat_path, provider)
 
-    return {
+    result = {
         "speakerId": speaker_id,
         "provider": provider,
         "model": model_id,
         "embedding": embedding,
         "durationSeconds": round(actual_seconds, 3),
-        "segmentCount": len(ranges),
+        "segmentCount": len(selected_ranges),
         "status": "ok",
+    }
+    result.update(_range_metadata(requested_ranges, selected_ranges))
+    return result
+
+
+def _range_metadata(
+    requested: Optional[List[Tuple[float, float]]],
+    selected: List[Tuple[float, float]],
+) -> Dict[str, Any]:
+    """Builds the shared range-metadata block emitted by concatenate/extract.
+
+    Keys: ``requestedRanges`` (``None`` when no ranges requested),
+    ``selectedRanges``, ``selectedSegmentCount``, ``selectedSpeechSeconds``.
+    """
+    speech_seconds = sum(end - start for start, end in selected)
+    return {
+        "requestedRanges": requested,
+        "selectedRanges": selected,
+        "selectedSegmentCount": len(selected),
+        "selectedSpeechSeconds": round(speech_seconds, 3),
     }
 
 
@@ -837,12 +886,14 @@ def _cmd_extract(args: argparse.Namespace) -> int:
             raise SpeakerIdError("--speaker-id is required when --segments is given")
         payload = json.loads(Path(args.segments).read_text(encoding="utf-8"))
         segments = payload.get("segments") or []
+        parsed_ranges = parse_time_ranges(getattr(args, "range", None))
         result = extract_speaker_segments(
             audio_path=audio_path,
             segments=segments,
             speaker_id=args.speaker_id,
             provider=args.provider,
             minimum_speech_seconds=args.minimum_speech_seconds,
+            ranges=parsed_ranges or None,
         )
     else:
         result = extract_whole_audio(
@@ -877,6 +928,11 @@ def _cmd_concatenate(args: argparse.Namespace) -> int:
     No ML involved -- just WAV slicing + concatenation -- so it is fast and
     runs in either venv. Used by the interactive ``stt name-speakers`` loop to
     get a preview+enrollment audio clip per speaker.
+
+    When ``--range`` is supplied (repeatedly), each matching speaker segment
+    is *intersected* with the requested ranges (clipped to segment
+    boundaries), so the output WAV contains only the requested speaker/time
+    ranges. Without ``--range`` behavior is fully backward compatible.
     """
     from .wav_slicing import concatenate_wav_segments, normalize_wav_file, rank_ranges_by_energy
 
@@ -888,12 +944,20 @@ def _cmd_concatenate(args: argparse.Namespace) -> int:
     if args.speaker_id is None:
         raise SpeakerIdError("--speaker-id is required")
 
+    requested_ranges = parse_time_ranges(getattr(args, "range", None))
+
     payload = json.loads(Path(args.segments).read_text(encoding="utf-8"))
     segments = payload.get("segments") or []
-    ranges = select_speaker_segments(segments, args.speaker_id)
+    ranges = select_speaker_segments(
+        segments, args.speaker_id, ranges=requested_ranges or None
+    )
     if not ranges:
+        if requested_ranges:
+            ranges_hint = " within the requested range(s)"
+        else:
+            ranges_hint = ""
         raise SpeakerIdError(
-            f"No usable segments found for speaker_id={args.speaker_id} "
+            f"No usable segments found for speaker_id={args.speaker_id}{ranges_hint} "
             f"(each segment must be >= {MINIMUM_SEGMENT_SECONDS}s with valid timestamps)."
         )
     max_seconds = getattr(args, "max_seconds", None)
@@ -935,17 +999,16 @@ def _cmd_concatenate(args: argparse.Namespace) -> int:
             # Normalization is a best-effort playback nicety; never let a
             # failure here abort the concatenate (the raw clip is still valid).
             applied_gain = 1.0
-    _write_json(
-        {
-            "speakerId": args.speaker_id,
-            "outputPath": args.out,
-            "segmentCount": len(ranges),
-            "durationSeconds": round(total, 3),
-            "normalizedGain": round(applied_gain, 3),
-            "status": "ok",
-        },
-        args.json,
-    )
+    payload_out: Dict[str, Any] = {
+        "speakerId": args.speaker_id,
+        "outputPath": args.out,
+        "segmentCount": len(ranges),
+        "durationSeconds": round(total, 3),
+        "normalizedGain": round(applied_gain, 3),
+        "status": "ok",
+    }
+    payload_out.update(_range_metadata(requested_ranges or None, ranges))
+    _write_json(payload_out, args.json)
     return 0
 
 
@@ -963,6 +1026,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     extract_parser.add_argument("--provider", default="mfcc-test", help="Embedding provider to use.")
     extract_parser.add_argument(
         "--minimum-speech-seconds", type=float, default=8.0, help="Minimum total speech seconds required."
+    )
+    extract_parser.add_argument(
+        "--range",
+        action="append",
+        default=None,
+        dest="range",
+        help=(
+            "Restrict extraction to specific time ranges (repeatable). "
+            "Each value is 'start-end' in seconds (123.4-180.0), MM:SS "
+            "(02:03-03:00), or HH:MM:SS (00:41:30-00:57:00). "
+            "Only used with --segments and --speaker-id."
+        ),
     )
     extract_parser.add_argument("--json", help="Path to write JSON result (also printed to stdout).")
     extract_parser.set_defaults(func=_cmd_extract)
@@ -988,6 +1063,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     concat_parser.add_argument("--no-best-segments", dest="best_segments", action="store_false", help="Keep segments in chronological order instead of ranking by energy.")
     concat_parser.add_argument("--normalize", action="store_true", help="Apply perceptual speech-loudness normalization so quiet tracks (e.g. system-audio taps) play as loud as mic tracks.")
     concat_parser.add_argument("--target-loudness", type=float, default=-19.0, help="Target loudness in dBFS for --normalize (default -19.0).")
+    concat_parser.add_argument(
+        "--range",
+        action="append",
+        default=None,
+        dest="range",
+        help=(
+            "Restrict concatenation to specific time ranges (repeatable). "
+            "Each value is 'start-end' in seconds (123.4-180.0), MM:SS "
+            "(02:03-03:00), or HH:MM:SS (00:41:30-00:57:00). Matching "
+            "speaker segments are clipped to the requested ranges."
+        ),
+    )
     concat_parser.add_argument("--json", help="Path to write JSON result (also printed to stdout).")
     concat_parser.set_defaults(func=_cmd_concatenate)
 

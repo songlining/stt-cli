@@ -1011,3 +1011,582 @@ class TestFilterSpeakerSegments:
         assert result["requestedRanges"] == [(2490.0, 3420.0)]
         assert result["selectedRanges"] == [(2490.0, 3420.0)]
         assert result["selectedSpeechSeconds"] == pytest.approx(930.0, abs=0.001)
+
+
+# ===========================================================================
+# Task 02: range-aware concatenate / extract CLI
+# ===========================================================================
+
+
+class TestConcatenateRangeCliArgParsing:
+    """Unit: argument parsing for repeated --range on the concatenate subcommand."""
+
+    def test_concatenate_parses_single_range(self):
+        parser = speaker_id.build_arg_parser()
+        args = parser.parse_args(
+            [
+                "concatenate",
+                "--audio", "a.wav",
+                "--segments", "s.json",
+                "--speaker-id", "0",
+                "--out", "o.wav",
+                "--range", "10-20",
+            ]
+        )
+        assert args.range == ["10-20"]
+        assert args.command == "concatenate"
+
+    def test_concatenate_parses_repeated_ranges(self):
+        parser = speaker_id.build_arg_parser()
+        args = parser.parse_args(
+            [
+                "concatenate",
+                "--audio", "a.wav",
+                "--segments", "s.json",
+                "--speaker-id", "0",
+                "--out", "o.wav",
+                "--range", "10-20",
+                "--range", "30-40",
+                "--range", "02:03-03:00",
+            ]
+        )
+        assert args.range == ["10-20", "30-40", "02:03-03:00"]
+
+    def test_concatenate_range_defaults_to_none(self):
+        parser = speaker_id.build_arg_parser()
+        args = parser.parse_args(
+            [
+                "concatenate",
+                "--audio", "a.wav",
+                "--segments", "s.json",
+                "--speaker-id", "0",
+                "--out", "o.wav",
+            ]
+        )
+        assert args.range is None
+
+
+class TestExtractRangeCliArgParsing:
+    """Unit: argument parsing for repeated --range on the extract subcommand."""
+
+    def test_extract_parses_single_range(self):
+        parser = speaker_id.build_arg_parser()
+        args = parser.parse_args(
+            [
+                "extract",
+                "--audio", "a.wav",
+                "--segments", "s.json",
+                "--speaker-id", "0",
+                "--range", "10-20",
+            ]
+        )
+        assert args.range == ["10-20"]
+
+    def test_extract_parses_repeated_ranges(self):
+        parser = speaker_id.build_arg_parser()
+        args = parser.parse_args(
+            [
+                "extract",
+                "--audio", "a.wav",
+                "--segments", "s.json",
+                "--speaker-id", "0",
+                "--range", "10-20",
+                "--range", "30-40",
+            ]
+        )
+        assert args.range == ["10-20", "30-40"]
+
+    def test_extract_range_defaults_to_none(self):
+        parser = speaker_id.build_arg_parser()
+        args = parser.parse_args(
+            [
+                "extract",
+                "--audio", "a.wav",
+            ]
+        )
+        assert args.range is None
+
+
+class TestExtractSpeakerSegmentsWithRanges:
+    """Unit: JSON metadata fields for selected ranges in extract_speaker_segments."""
+
+    def test_extract_with_ranges_includes_range_metadata(self, tmp_path):
+        # Arrange: a 20s tone WAV
+        wav_path = tmp_path / "full.wav"
+        _write_wav(wav_path, _tone(20.0))
+        segments = [
+            {"speaker_id": "0", "start_time": 0.0, "end_time": 10.0, "text": "a"},
+            {"speaker_id": "0", "start_time": 10.0, "end_time": 20.0, "text": "b"},
+        ]
+        # Act: request only 2-7s of speaker 0 (5s of speech)
+        result = speaker_id.extract_speaker_segments(
+            audio_path=wav_path,
+            segments=segments,
+            speaker_id="0",
+            provider="mfcc-test",
+            minimum_speech_seconds=3.0,
+            ranges=[(2.0, 7.0)],
+        )
+        # Assert
+        assert result["status"] == "ok"
+        assert result["requestedRanges"] == [(2.0, 7.0)]
+        assert result["selectedRanges"] == [(2.0, 7.0)]
+        assert result["selectedSegmentCount"] == 1
+        assert result["selectedSpeechSeconds"] == pytest.approx(5.0, abs=0.01)
+        assert result["durationSeconds"] == pytest.approx(5.0, abs=0.05)
+        assert result["embedding"]
+
+    def test_extract_without_ranges_has_none_requested(self, tmp_path):
+        # Arrange
+        wav_path = tmp_path / "full.wav"
+        _write_wav(wav_path, _tone(20.0))
+        segments = [
+            {"speaker_id": "0", "start_time": 0.0, "end_time": 12.0, "text": "a"},
+        ]
+        # Act
+        result = speaker_id.extract_speaker_segments(
+            audio_path=wav_path,
+            segments=segments,
+            speaker_id="0",
+            provider="mfcc-test",
+            minimum_speech_seconds=8.0,
+        )
+        # Assert: backward compatible -- requestedRanges is None
+        assert result["status"] == "ok"
+        assert result["requestedRanges"] is None
+        assert result["selectedRanges"] == [(0.0, 12.0)]
+        assert result["selectedSpeechSeconds"] == pytest.approx(12.0, abs=0.01)
+
+    def test_extract_too_short_with_ranges_still_emits_metadata(self, tmp_path):
+        # Arrange: the requested range yields too little speech
+        wav_path = tmp_path / "full.wav"
+        _write_wav(wav_path, _tone(20.0))
+        segments = [
+            {"speaker_id": "0", "start_time": 0.0, "end_time": 5.0, "text": "a"},
+        ]
+        # Act: request a 2s range, minimum is 8s
+        result = speaker_id.extract_speaker_segments(
+            audio_path=wav_path,
+            segments=segments,
+            speaker_id="0",
+            provider="mfcc-test",
+            minimum_speech_seconds=8.0,
+            ranges=[(1.0, 3.0)],
+        )
+        # Assert
+        assert result["status"] == "too_short"
+        assert result["embedding"] is None
+        assert result["requestedRanges"] == [(1.0, 3.0)]
+        assert result["selectedRanges"] == [(1.0, 3.0)]
+        assert result["selectedSpeechSeconds"] == pytest.approx(2.0, abs=0.01)
+
+    def test_extract_ranges_clip_to_segment_boundary(self, tmp_path):
+        # Arrange
+        wav_path = tmp_path / "full.wav"
+        _write_wav(wav_path, _tone(20.0))
+        segments = [
+            {"speaker_id": "0", "start_time": 5.0, "end_time": 10.0, "text": "a"},
+        ]
+        # Act: request 0-15, but segment is only 5-10 -> clipped to 5-10
+        result = speaker_id.extract_speaker_segments(
+            audio_path=wav_path,
+            segments=segments,
+            speaker_id="0",
+            provider="mfcc-test",
+            minimum_speech_seconds=3.0,
+            ranges=[(0.0, 15.0)],
+        )
+        # Assert
+        assert result["status"] == "ok"
+        assert result["selectedRanges"] == [(5.0, 10.0)]
+        assert result["durationSeconds"] == pytest.approx(5.0, abs=0.05)
+
+
+class TestConcatenateRangeIntegration:
+    """Integration/e2e: concatenate a selected range and verify WAV/metadata."""
+
+    def _write_segments_json(self, path, segments):
+        path.write_text(json.dumps({"segments": segments}), encoding="utf-8")
+
+    def test_concatenate_range_creates_wav_with_only_requested_speech(self, tmp_path):
+        # Arrange: 20s tone; speaker 0 talks in 0-10, speaker 1 in 10-20
+        wav_path = tmp_path / "full.wav"
+        _write_wav(wav_path, _tone(20.0))
+        segments_path = tmp_path / "segments.json"
+        self._write_segments_json(
+            segments_path,
+            [
+                {"speaker_id": "0", "start_time": 0.0, "end_time": 10.0, "text": "a"},
+                {"speaker_id": "1", "start_time": 10.0, "end_time": 20.0, "text": "b"},
+            ],
+        )
+        out_wav = tmp_path / "out.wav"
+        out_json = tmp_path / "out.json"
+        # Act: request only 2-6s (within speaker 0's segment)
+        exit_code = speaker_id.main(
+            [
+                "concatenate",
+                "--audio", str(wav_path),
+                "--segments", str(segments_path),
+                "--speaker-id", "0",
+                "--out", str(out_wav),
+                "--no-best-segments",
+                "--range", "2-6",
+                "--json", str(out_json),
+            ]
+        )
+        # Assert
+        assert exit_code == 0
+        payload = json.loads(out_json.read_text(encoding="utf-8"))
+        assert payload["status"] == "ok"
+        # JSON round-trip converts tuples to lists, so expected ranges are
+        # list-of-lists here (not list-of-tuples).
+        assert payload["requestedRanges"] == [[2.0, 6.0]]
+        assert payload["selectedRanges"] == [[2.0, 6.0]]
+        assert payload["selectedSegmentCount"] == 1
+        assert payload["selectedSpeechSeconds"] == pytest.approx(4.0, abs=0.05)
+        assert payload["durationSeconds"] == pytest.approx(4.0, abs=0.05)
+        # output WAV is valid PCM readable by Python wave
+        with wave.open(str(out_wav), "rb") as handle:
+            assert handle.getnchannels() == 1
+            assert handle.getsampwidth() == 2
+            assert handle.getframerate() == 16000
+            # ~4s of audio at 16kHz
+            frames = handle.getnframes()
+            assert abs(frames / 16000 - 4.0) < 0.1
+
+    def test_concatenate_range_excludes_other_speakers(self, tmp_path):
+        # Arrange
+        wav_path = tmp_path / "full.wav"
+        _write_wav(wav_path, _tone(20.0))
+        segments_path = tmp_path / "segments.json"
+        self._write_segments_json(
+            segments_path,
+            [
+                {"speaker_id": "0", "start_time": 0.0, "end_time": 10.0, "text": "a"},
+                {"speaker_id": "1", "start_time": 10.0, "end_time": 20.0, "text": "b"},
+            ],
+        )
+        out_wav = tmp_path / "out.wav"
+        out_json = tmp_path / "out.json"
+        # Act: request 0-20 but only speaker 0 -> should produce 10s, not 20s
+        exit_code = speaker_id.main(
+            [
+                "concatenate",
+                "--audio", str(wav_path),
+                "--segments", str(segments_path),
+                "--speaker-id", "0",
+                "--out", str(out_wav),
+                "--no-best-segments",
+                "--range", "0-20",
+                "--json", str(out_json),
+            ]
+        )
+        # Assert
+        assert exit_code == 0
+        payload = json.loads(out_json.read_text(encoding="utf-8"))
+        assert payload["selectedSpeechSeconds"] == pytest.approx(10.0, abs=0.05)
+        assert payload["durationSeconds"] == pytest.approx(10.0, abs=0.05)
+
+    def test_concatenate_multiple_ranges(self, tmp_path):
+        # Arrange: speaker 0 has segments at 0-10 and 20-30
+        wav_path = tmp_path / "full.wav"
+        _write_wav(wav_path, _tone(30.0))
+        segments_path = tmp_path / "segments.json"
+        self._write_segments_json(
+            segments_path,
+            [
+                {"speaker_id": "0", "start_time": 0.0, "end_time": 10.0, "text": "a"},
+                {"speaker_id": "1", "start_time": 10.0, "end_time": 20.0, "text": "b"},
+                {"speaker_id": "0", "start_time": 20.0, "end_time": 30.0, "text": "c"},
+            ],
+        )
+        out_wav = tmp_path / "out.wav"
+        out_json = tmp_path / "out.json"
+        # Act: request 1-4 and 22-27 (3s + 5s = 8s)
+        exit_code = speaker_id.main(
+            [
+                "concatenate",
+                "--audio", str(wav_path),
+                "--segments", str(segments_path),
+                "--speaker-id", "0",
+                "--out", str(out_wav),
+                "--no-best-segments",
+                "--range", "1-4",
+                "--range", "22-27",
+                "--json", str(out_json),
+            ]
+        )
+        # Assert
+        assert exit_code == 0
+        payload = json.loads(out_json.read_text(encoding="utf-8"))
+        # JSON round-trip converts tuples to lists.
+        assert payload["requestedRanges"] == [[1.0, 4.0], [22.0, 27.0]]
+        assert payload["selectedRanges"] == [[1.0, 4.0], [22.0, 27.0]]
+        assert payload["selectedSegmentCount"] == 2
+        assert payload["selectedSpeechSeconds"] == pytest.approx(8.0, abs=0.05)
+        assert payload["durationSeconds"] == pytest.approx(8.0, abs=0.05)
+
+    def test_concatenate_no_range_backward_compatible(self, tmp_path):
+        # Arrange
+        wav_path = tmp_path / "full.wav"
+        _write_wav(wav_path, _tone(20.0))
+        segments_path = tmp_path / "segments.json"
+        self._write_segments_json(
+            segments_path,
+            [
+                {"speaker_id": "0", "start_time": 0.0, "end_time": 10.0, "text": "a"},
+            ],
+        )
+        out_wav = tmp_path / "out.wav"
+        out_json = tmp_path / "out.json"
+        # Act: no --range
+        exit_code = speaker_id.main(
+            [
+                "concatenate",
+                "--audio", str(wav_path),
+                "--segments", str(segments_path),
+                "--speaker-id", "0",
+                "--out", str(out_wav),
+                "--no-best-segments",
+                "--json", str(out_json),
+            ]
+        )
+        # Assert
+        assert exit_code == 0
+        payload = json.loads(out_json.read_text(encoding="utf-8"))
+        # backward-compatible: requestedRanges is None, full segment selected
+        assert payload["requestedRanges"] is None
+        assert payload["selectedRanges"] == [[0.0, 10.0]]
+        assert payload["durationSeconds"] == pytest.approx(10.0, abs=0.05)
+
+    def test_concatenate_range_no_usable_speech_specific_error(self, tmp_path):
+        # Arrange: speaker 0 segment is at 0-10; request a non-overlapping range
+        wav_path = tmp_path / "full.wav"
+        _write_wav(wav_path, _tone(20.0))
+        segments_path = tmp_path / "segments.json"
+        self._write_segments_json(
+            segments_path,
+            [
+                {"speaker_id": "0", "start_time": 0.0, "end_time": 10.0, "text": "a"},
+            ],
+        )
+        out_wav = tmp_path / "out.wav"
+        # Act: request 100-200 which does not overlap any segment
+        exit_code = speaker_id.main(
+            [
+                "concatenate",
+                "--audio", str(wav_path),
+                "--segments", str(segments_path),
+                "--speaker-id", "0",
+                "--out", str(out_wav),
+                "--range", "100-200",
+            ]
+        )
+        # Assert: specific error message mentioning the requested range
+        assert exit_code == 1
+
+    def test_concatenate_range_respects_max_seconds(self, tmp_path):
+        # Arrange
+        wav_path = tmp_path / "full.wav"
+        _write_wav(wav_path, _tone(20.0))
+        segments_path = tmp_path / "segments.json"
+        self._write_segments_json(
+            segments_path,
+            [
+                {"speaker_id": "0", "start_time": 0.0, "end_time": 10.0, "text": "a"},
+            ],
+        )
+        out_wav = tmp_path / "out.wav"
+        out_json = tmp_path / "out.json"
+        # Act: range 0-10 (10s), but max-seconds 3 -> capped to 3s
+        exit_code = speaker_id.main(
+            [
+                "concatenate",
+                "--audio", str(wav_path),
+                "--segments", str(segments_path),
+                "--speaker-id", "0",
+                "--out", str(out_wav),
+                "--no-best-segments",
+                "--range", "0-10",
+                "--max-seconds", "3",
+                "--json", str(out_json),
+            ]
+        )
+        # Assert
+        assert exit_code == 0
+        payload = json.loads(out_json.read_text(encoding="utf-8"))
+        assert payload["durationSeconds"] == pytest.approx(3.0, abs=0.1)
+
+    def test_concatenate_output_wav_readable_by_wave_module(self, tmp_path):
+        # Arrange
+        wav_path = tmp_path / "full.wav"
+        _write_wav(wav_path, _tone(15.0))
+        segments_path = tmp_path / "segments.json"
+        self._write_segments_json(
+            segments_path,
+            [
+                {"speaker_id": "0", "start_time": 0.0, "end_time": 12.0, "text": "a"},
+            ],
+        )
+        out_wav = tmp_path / "out.wav"
+        # Act
+        speaker_id.main(
+            [
+                "concatenate",
+                "--audio", str(wav_path),
+                "--segments", str(segments_path),
+                "--speaker-id", "0",
+                "--out", str(out_wav),
+                "--no-best-segments",
+                "--range", "1-9",
+            ]
+        )
+        # Assert: wave.open must succeed and report expected PCM params
+        with wave.open(str(out_wav), "rb") as handle:
+            assert handle.getnchannels() == 1
+            assert handle.getsampwidth() == 2
+            assert handle.getframerate() == 16000
+
+
+class TestExtractRangeIntegration:
+    """Integration/e2e: extract an embedding from selected ranges and verify
+    unrelated ranges do not affect selected speech seconds."""
+
+    def _write_segments_json(self, path, segments):
+        path.write_text(json.dumps({"segments": segments}), encoding="utf-8")
+
+    def test_extract_range_cli_includes_range_metadata(self, tmp_path):
+        # Arrange
+        wav_path = tmp_path / "full.wav"
+        _write_wav(wav_path, _tone(20.0))
+        segments_path = tmp_path / "segments.json"
+        self._write_segments_json(
+            segments_path,
+            [
+                {"speaker_id": "0", "start_time": 0.0, "end_time": 12.0, "text": "a"},
+            ],
+        )
+        out_json = tmp_path / "out.json"
+        # Act: extract from 1-9 (8s) with minimum 8s
+        exit_code = speaker_id.main(
+            [
+                "extract",
+                "--audio", str(wav_path),
+                "--segments", str(segments_path),
+                "--speaker-id", "0",
+                "--provider", "mfcc-test",
+                "--minimum-speech-seconds", "8",
+                "--range", "1-9",
+                "--json", str(out_json),
+            ]
+        )
+        # Assert
+        assert exit_code == 0
+        payload = json.loads(out_json.read_text(encoding="utf-8"))
+        assert payload["status"] == "ok"
+        # JSON round-trip converts tuples to lists.
+        assert payload["requestedRanges"] == [[1.0, 9.0]]
+        assert payload["selectedRanges"] == [[1.0, 9.0]]
+        assert payload["selectedSegmentCount"] == 1
+        assert payload["selectedSpeechSeconds"] == pytest.approx(8.0, abs=0.05)
+        assert payload["embedding"]
+
+    def test_extract_range_unrelated_ranges_do_not_affect_selected_speech(self, tmp_path):
+        # Arrange: speaker 0 has segments at 0-10 and 100-200 in the transcript,
+        # but the WAV is only 20s long. We request a range that only overlaps
+        # the first segment. The second segment (100-200) must NOT contribute.
+        wav_path = tmp_path / "full.wav"
+        _write_wav(wav_path, _tone(20.0))
+        segments_path = tmp_path / "segments.json"
+        self._write_segments_json(
+            segments_path,
+            [
+                {"speaker_id": "0", "start_time": 0.0, "end_time": 10.0, "text": "a"},
+                {"speaker_id": "0", "start_time": 100.0, "end_time": 200.0, "text": "b"},
+            ],
+        )
+        out_json = tmp_path / "out.json"
+        # Act: request only 0-8 (within the first segment)
+        exit_code = speaker_id.main(
+            [
+                "extract",
+                "--audio", str(wav_path),
+                "--segments", str(segments_path),
+                "--speaker-id", "0",
+                "--provider", "mfcc-test",
+                "--minimum-speech-seconds", "5",
+                "--range", "0-8",
+                "--json", str(out_json),
+            ]
+        )
+        # Assert: only 8s of speech selected, not 8+100=108s
+        assert exit_code == 0
+        payload = json.loads(out_json.read_text(encoding="utf-8"))
+        assert payload["status"] == "ok"
+        assert payload["selectedSpeechSeconds"] == pytest.approx(8.0, abs=0.05)
+        assert payload["durationSeconds"] == pytest.approx(8.0, abs=0.05)
+        assert payload["selectedSegmentCount"] == 1
+
+    def test_extract_range_excludes_other_speakers_speech(self, tmp_path):
+        # Arrange: speaker 0 and 1 interleaved; range covers both but only 0 should count
+        wav_path = tmp_path / "full.wav"
+        _write_wav(wav_path, _tone(20.0))
+        segments_path = tmp_path / "segments.json"
+        self._write_segments_json(
+            segments_path,
+            [
+                {"speaker_id": "0", "start_time": 0.0, "end_time": 10.0, "text": "a"},
+                {"speaker_id": "1", "start_time": 10.0, "end_time": 20.0, "text": "b"},
+            ],
+        )
+        out_json = tmp_path / "out.json"
+        # Act: request 0-20 (covers both), but extracting speaker 0 -> 10s
+        exit_code = speaker_id.main(
+            [
+                "extract",
+                "--audio", str(wav_path),
+                "--segments", str(segments_path),
+                "--speaker-id", "0",
+                "--provider", "mfcc-test",
+                "--minimum-speech-seconds", "5",
+                "--range", "0-20",
+                "--json", str(out_json),
+            ]
+        )
+        # Assert
+        assert exit_code == 0
+        payload = json.loads(out_json.read_text(encoding="utf-8"))
+        assert payload["selectedSpeechSeconds"] == pytest.approx(10.0, abs=0.05)
+        assert payload["durationSeconds"] == pytest.approx(10.0, abs=0.05)
+
+    def test_extract_range_no_range_backward_compatible(self, tmp_path):
+        # Arrange
+        wav_path = tmp_path / "full.wav"
+        _write_wav(wav_path, _tone(20.0))
+        segments_path = tmp_path / "segments.json"
+        self._write_segments_json(
+            segments_path,
+            [
+                {"speaker_id": "0", "start_time": 0.0, "end_time": 12.0, "text": "a"},
+            ],
+        )
+        out_json = tmp_path / "out.json"
+        # Act: no --range
+        exit_code = speaker_id.main(
+            [
+                "extract",
+                "--audio", str(wav_path),
+                "--segments", str(segments_path),
+                "--speaker-id", "0",
+                "--provider", "mfcc-test",
+                "--minimum-speech-seconds", "8",
+                "--json", str(out_json),
+            ]
+        )
+        # Assert: backward compatible, requestedRanges is None
+        assert exit_code == 0
+        payload = json.loads(out_json.read_text(encoding="utf-8"))
+        assert payload["requestedRanges"] is None
+        # JSON round-trip converts tuples to lists.
+        assert payload["selectedRanges"] == [[0.0, 12.0]]
