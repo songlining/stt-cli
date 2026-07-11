@@ -913,3 +913,398 @@ class TestListWithAudit:
         assert payload["audit_available"] is False
         for s in payload["speakers"]:
             assert "audit" not in s
+
+
+# ===========================================================================
+# Task 07: Whole-cluster enrollment safety guard (unit)
+# ===========================================================================
+
+
+class TestEnrollmentGuardDecision:
+    """Unit tests for the pure ``enrollment_guard_decision`` function.
+
+    Covers the four required cases: no audit, safe audit, unsafe audit, and a
+    missing speaker audit entry. Also verifies refusal output points at
+    ``purity-preview`` and ``enroll-ranges``.
+    """
+
+    def test_no_audit_warns_but_allows(self):
+        decision = helper.enrollment_guard_decision(None, "4", session="/tmp/s")
+        assert decision["decision"] == "warn"
+        assert decision["audit_available"] is False
+        assert decision["speaker_in_audit"] is False
+        assert decision["safe_to_enroll_whole_cluster"] is None
+        assert "no_speaker_audit_found" in decision["reasons"]
+        # A warning is surfaced (never silent), but enrollment is permitted.
+        assert "contaminate" in decision["recommendation"]
+        cmds = "\n".join(decision["commands"])
+        assert "audit" in cmds
+        assert "purity-preview" in cmds
+
+    def test_safe_audit_allows(self):
+        audit = {
+            "speakers": [
+                {
+                    "speaker_id": "1",
+                    "status": "pure_likely",
+                    "safe_to_enroll_whole_cluster": True,
+                    "reasons": ["compact cluster"],
+                }
+            ]
+        }
+        decision = helper.enrollment_guard_decision(audit, "1", session="/tmp/s")
+        assert decision["decision"] == "allow"
+        assert decision["audit_available"] is True
+        assert decision["speaker_in_audit"] is True
+        assert decision["status"] == "pure_likely"
+        assert decision["safe_to_enroll_whole_cluster"] is True
+
+    def test_unsafe_audit_refuses(self):
+        audit = {
+            "speakers": [
+                {
+                    "speaker_id": "4",
+                    "status": "mixed_suspected",
+                    "safe_to_enroll_whole_cluster": False,
+                    "reasons": ["span_to_speech_ratio 19.50 exceeds 3.00"],
+                }
+            ]
+        }
+        decision = helper.enrollment_guard_decision(
+            audit, "4", session="/tmp/s", name="Domingo Tamayo"
+        )
+        assert decision["decision"] == "refuse"
+        assert decision["speaker_in_audit"] is True
+        assert decision["status"] == "mixed_suspected"
+        assert decision["safe_to_enroll_whole_cluster"] is False
+        assert "span_to_speech_ratio" in decision["reasons"][0]
+
+    def test_unknown_status_audit_also_refuses(self):
+        # `unknown` clusters are safe_to_enroll_whole_cluster=false -> refuse.
+        audit = {
+            "speakers": [
+                {
+                    "speaker_id": "2",
+                    "status": "unknown",
+                    "safe_to_enroll_whole_cluster": False,
+                    "reasons": ["useful_speech_seconds 2.0 below minimum 5.0"],
+                }
+            ]
+        }
+        decision = helper.enrollment_guard_decision(audit, "2", session="/tmp/s")
+        assert decision["decision"] == "refuse"
+        assert decision["status"] == "unknown"
+
+    def test_missing_speaker_entry_warns(self):
+        # Audit exists for speaker 4, but we ask about speaker 9.
+        audit = {
+            "speakers": [
+                {
+                    "speaker_id": "4",
+                    "status": "mixed_suspected",
+                    "safe_to_enroll_whole_cluster": False,
+                    "reasons": ["ratio"],
+                }
+            ]
+        }
+        decision = helper.enrollment_guard_decision(audit, "9", session="/tmp/s")
+        assert decision["decision"] == "warn"
+        assert decision["audit_available"] is True
+        assert decision["speaker_in_audit"] is False
+        assert "speaker_not_in_audit" in decision["reasons"]
+        # Points the user at re-running audit and purity-preview.
+        cmds = "\n".join(decision["commands"])
+        assert "--force" in cmds
+        assert "purity-preview" in cmds
+
+    def test_audit_dict_without_speakers_list_is_treated_as_no_audit(self):
+        # A malformed audit (dict but no speakers list) cannot confirm safety.
+        decision = helper.enrollment_guard_decision(
+            {"safe_to_enroll_whole_cluster": True}, "4", session="/tmp/s"
+        )
+        assert decision["decision"] == "warn"
+
+    def test_refusal_output_includes_recommended_next_commands(self):
+        """Acceptance: refusal output points users to purity-preview and enroll-ranges."""
+        audit = {
+            "speakers": [
+                {
+                    "speaker_id": "4",
+                    "status": "mixed_suspected",
+                    "safe_to_enroll_whole_cluster": False,
+                    "reasons": ["ratio"],
+                }
+            ]
+        }
+        decision = helper.enrollment_guard_decision(
+            audit, "4", session="/tmp/s", name="Domingo Tamayo"
+        )
+        assert decision["decision"] == "refuse"
+        cmds = "\n".join(decision["commands"])
+        # Must point at both purity-preview and enroll-ranges.
+        assert "purity-preview" in cmds
+        assert "enroll-ranges" in cmds
+        # The enroll-ranges recommendation embeds the requested name + speaker id.
+        assert any(
+            "enroll-ranges" in c and '--speaker-id 4' in c and '--name "Domingo Tamayo"' in c
+            for c in decision["commands"]
+        )
+        # Recommendation prose names both tools too.
+        assert "purity-preview" in decision["recommendation"]
+        assert "enroll-ranges" in decision["recommendation"]
+
+    def test_allow_does_not_mention_enroll_ranges(self):
+        audit = {
+            "speakers": [
+                {
+                    "speaker_id": "1",
+                    "status": "pure_likely",
+                    "safe_to_enroll_whole_cluster": True,
+                    "reasons": ["compact"],
+                }
+            ]
+        }
+        decision = helper.enrollment_guard_decision(audit, "1", session="/tmp/s")
+        assert decision["decision"] == "allow"
+        assert not any("enroll-ranges" in c for c in decision["commands"])
+
+    def test_decision_is_deterministic(self):
+        audit = {
+            "speakers": [
+                {
+                    "speaker_id": "4",
+                    "status": "mixed_suspected",
+                    "safe_to_enroll_whole_cluster": False,
+                    "reasons": ["ratio"],
+                }
+            ]
+        }
+        a = helper.enrollment_guard_decision(audit, "4", session="/tmp/s", name="X")
+        b = helper.enrollment_guard_decision(audit, "4", session="/tmp/s", name="X")
+        assert json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
+
+
+class TestEvaluateEnrollmentGuard:
+    """The filesystem-backed wrapper loads the audit artifact for a session."""
+
+    def test_returns_warn_when_no_audit_file(self, tmp_path):
+        session = tmp_path / "session"
+        session.mkdir()
+        decision = helper.evaluate_enrollment_guard(session, "4")
+        assert decision["decision"] == "warn"
+        assert decision["audit_available"] is False
+
+    def test_reads_existing_audit_artifact(self, tmp_path):
+        session = tmp_path / "session"
+        session.mkdir()
+        audit = {
+            "speakers": [
+                {
+                    "speaker_id": "4",
+                    "status": "mixed_suspected",
+                    "safe_to_enroll_whole_cluster": False,
+                    "reasons": ["ratio"],
+                }
+            ]
+        }
+        (session / helper.AUDIT_FILENAME).write_text(json.dumps(audit), encoding="utf-8")
+        decision = helper.evaluate_enrollment_guard(session, "4")
+        assert decision["decision"] == "refuse"
+        assert decision["status"] == "mixed_suspected"
+
+
+# ===========================================================================
+# Task 07: enroll command argument parsing
+# ===========================================================================
+
+
+class TestEnrollArgParsing:
+    def test_required_args(self):
+        parser = helper.build_parser()
+        args = parser.parse_args(
+            ["enroll", "--session", "/tmp/s", "--speaker-id", "4", "--name", "Test"]
+        )
+        assert args.session == "/tmp/s"
+        assert args.speaker_id == "4"
+        assert args.name == "Test"
+        assert args.no_enroll is False
+
+    def test_no_enroll_flag(self):
+        parser = helper.build_parser()
+        args = parser.parse_args(
+            [
+                "enroll",
+                "--session", "/tmp/s",
+                "--speaker-id", "4",
+                "--name", "Test",
+                "--no-enroll",
+            ]
+        )
+        assert args.no_enroll is True
+
+    def test_func_is_do_enroll(self):
+        parser = helper.build_parser()
+        args = parser.parse_args(
+            ["enroll", "--session", "/tmp/s", "--speaker-id", "4", "--name", "Test"]
+        )
+        assert args.func is helper.do_enroll
+
+
+# ===========================================================================
+# Task 07: Integration / e2e -- whole-cluster enroll guard via dry-run
+# ===========================================================================
+
+
+class TestEnrollGuardEndToEnd:
+    """Run the real ``enroll --no-enroll`` dry-run against fixture sessions.
+
+    The dry-run path evaluates the same guard a real enrollment would, without
+    touching the backend or saving a profile. This lets us verify refusal /
+    allowance without the runtime venv or WAV files.
+    """
+
+    def _make_session(self, tmp_path: Path, segments) -> Path:
+        session = tmp_path / "session"
+        session.mkdir()
+        _write_transcript(session / "transcript.json", segments)
+        return session
+
+    def test_unsafe_audit_refuses_even_on_dry_run(self, tmp_path, capsys):
+        # A long, widely-spread cluster -> audit will classify it mixed_suspected.
+        segments = [_seg(4, i * 100.0, i * 100.0 + 5.0, f"u{i}") for i in range(40)]
+        session = self._make_session(tmp_path, segments)
+
+        # Generate the audit artifact first.
+        helper.main(["audit", "--session", str(session)])
+        capsys.readouterr()
+        audit = json.loads((session / helper.AUDIT_FILENAME).read_text())
+        assert audit["speakers"][0]["safe_to_enroll_whole_cluster"] is False
+
+        # Now attempt whole-cluster enrollment as a dry run.
+        with pytest.raises(SystemExit) as exc:
+            helper.main(
+                [
+                    "enroll",
+                    "--session", str(session),
+                    "--speaker-id", "4",
+                    "--name", "Test",
+                    "--no-enroll",
+                ]
+            )
+        # Refusal exits nonzero (exit code 2).
+        assert exc.value.code != 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "refused"
+        assert payload["guard"]["decision"] == "refuse"
+        # Refusal output points users to purity-preview and enroll-ranges.
+        cmds = "\n".join(payload["guard"]["commands"])
+        assert "purity-preview" in cmds
+        assert "enroll-ranges" in cmds
+
+        # Acceptance: no profile is modified when enrollment is refused. The
+        # guard short-circuits before creating any helper artifacts.
+        assert not (session / ".speaker-clips").exists()
+        # Only the audit artifact + transcript should be present.
+        names = sorted(p.name for p in session.iterdir())
+        assert "transcript.json" in names
+        assert helper.AUDIT_FILENAME in names
+        assert ".speaker-clips" not in names
+
+    def test_safe_cluster_dry_run_passes_the_guard(self, tmp_path, capsys):
+        # A compact cluster -> audit classifies it pure_likely / safe.
+        segments = [_seg(1, 0.0, 8.0, "pure speaker")]
+        session = self._make_session(tmp_path, segments)
+
+        helper.main(["audit", "--session", str(session)])
+        capsys.readouterr()
+        audit = json.loads((session / helper.AUDIT_FILENAME).read_text())
+        assert audit["speakers"][0]["safe_to_enroll_whole_cluster"] is True
+
+        # Dry-run enroll must NOT raise (guard passes).
+        helper.main(
+            [
+                "enroll",
+                "--session", str(session),
+                "--speaker-id", "1",
+                "--name", "Test",
+                "--no-enroll",
+            ]
+        )
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "dry_run"
+        assert payload["guard"]["decision"] == "allow"
+        assert payload["would_enroll"] is True
+        # Safe clusters can still use whole-cluster enrollment.
+        assert payload["guard"]["safe_to_enroll_whole_cluster"] is True
+        # Dry run touches nothing.
+        assert not (session / ".speaker-clips").exists()
+
+    def test_missing_audit_dry_run_warns_but_would_enroll(self, tmp_path, capsys):
+        # No audit run -> guard warns but permits (no silent enrollment).
+        segments = [_seg(1, 0.0, 8.0, "pure")]
+        session = self._make_session(tmp_path, segments)
+
+        helper.main(
+            [
+                "enroll",
+                "--session", str(session),
+                "--speaker-id", "1",
+                "--name", "Test",
+                "--no-enroll",
+            ]
+        )
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "dry_run"
+        assert payload["guard"]["decision"] == "warn"
+        assert payload["guard"]["audit_available"] is False
+        # Warning is surfaced (recommendation mentions contamination risk).
+        assert "contaminate" in payload["guard"]["recommendation"]
+        assert payload["would_enroll"] is True
+
+    def test_refusal_does_not_mutate_transcript(self, tmp_path, capsys):
+        segments = [_seg(4, i * 100.0, i * 100.0 + 5.0, f"u{i}") for i in range(40)]
+        session = self._make_session(tmp_path, segments)
+        transcript_before = (session / "transcript.json").read_bytes()
+
+        helper.main(["audit", "--session", str(session)])
+        capsys.readouterr()
+
+        with pytest.raises(SystemExit):
+            helper.main(
+                [
+                    "enroll",
+                    "--session", str(session),
+                    "--speaker-id", "4",
+                    "--name", "Test",
+                    "--no-enroll",
+                ]
+            )
+        capsys.readouterr()
+        # Transcript is byte-identical after a refused enrollment.
+        assert (session / "transcript.json").read_bytes() == transcript_before
+
+    def test_refusal_for_unknown_status_cluster(self, tmp_path, capsys):
+        # A bracket-only cluster -> audit status 'unknown', unsafe to enroll.
+        segments = [_seg(2, 0.0, 3.0, "[Silence]")]
+        session = self._make_session(tmp_path, segments)
+
+        helper.main(["audit", "--session", str(session)])
+        capsys.readouterr()
+        audit = json.loads((session / helper.AUDIT_FILENAME).read_text())
+        assert audit["speakers"][0]["status"] == "unknown"
+        assert audit["speakers"][0]["safe_to_enroll_whole_cluster"] is False
+
+        with pytest.raises(SystemExit) as exc:
+            helper.main(
+                [
+                    "enroll",
+                    "--session", str(session),
+                    "--speaker-id", "2",
+                    "--name", "Ghost",
+                    "--no-enroll",
+                ]
+            )
+        assert exc.value.code != 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "refused"
+        assert payload["guard"]["status"] == "unknown"
