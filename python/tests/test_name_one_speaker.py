@@ -1308,3 +1308,402 @@ class TestEnrollGuardEndToEnd:
         payload = json.loads(capsys.readouterr().out)
         assert payload["status"] == "refused"
         assert payload["guard"]["status"] == "unknown"
+
+
+# ===========================================================================
+# Task 03a: enroll-ranges CLI surface and dry-run output
+# ===========================================================================
+
+
+class TestEnrollRangesArgParsing:
+    """Unit: parser accepts required and optional enroll-ranges arguments
+    (Arrange-Act-Assert)."""
+
+    def test_required_args_parse_correctly(self):
+        # Arrange: only the required flags.
+        parser = helper.build_parser()
+        # Act
+        args = parser.parse_args(
+            [
+                "enroll-ranges",
+                "--session", "/tmp/s",
+                "--speaker-id", "4",
+                "--range", "10-20",
+                "--name", "Domingo",
+            ]
+        )
+        # Assert
+        assert args.command == "enroll-ranges"
+        assert args.session == "/tmp/s"
+        assert args.speaker_id == "4"
+        assert args.name == "Domingo"
+        assert getattr(args, "range") == ["10-20"]
+        assert args.source is None
+        assert args.sample_seconds == 60.0
+        assert args.no_enroll is False
+
+    def test_repeated_range_appends(self):
+        # Arrange
+        parser = helper.build_parser()
+        # Act
+        args = parser.parse_args(
+            [
+                "enroll-ranges",
+                "--session", "/tmp/s",
+                "--speaker-id", "4",
+                "--range", "10-20",
+                "--range", "30-40",
+                "--name", "Domingo",
+            ]
+        )
+        # Assert
+        assert getattr(args, "range") == ["10-20", "30-40"]
+
+    def test_optional_args_parse_correctly(self):
+        # Arrange: all optional flags supplied.
+        parser = helper.build_parser()
+        # Act
+        args = parser.parse_args(
+            [
+                "enroll-ranges",
+                "--session", "/tmp/s",
+                "--speaker-id", "4",
+                "--range", "10-20",
+                "--name", "Domingo",
+                "--source", "mic",
+                "--sample-seconds", "30",
+                "--no-enroll",
+            ]
+        )
+        # Assert
+        assert args.source == "mic"
+        assert args.sample_seconds == 30.0
+        assert args.no_enroll is True
+
+    def test_func_is_do_enroll_ranges(self):
+        # Arrange
+        parser = helper.build_parser()
+        # Act
+        args = parser.parse_args(
+            [
+                "enroll-ranges",
+                "--session", "/tmp/s",
+                "--speaker-id", "4",
+                "--range", "10-20",
+                "--name", "Domingo",
+            ]
+        )
+        # Assert
+        assert args.func is helper.do_enroll_ranges
+
+    def test_missing_name_is_rejected_by_argparse(self):
+        # Arrange: --name omitted (argparse-level required).
+        parser = helper.build_parser()
+        # Act / Assert
+        with pytest.raises(SystemExit):
+            parser.parse_args(
+                ["enroll-ranges", "--session", "/tmp/s",
+                 "--speaker-id", "4", "--range", "10-20"]
+            )
+
+
+class TestEnrollRangesValidation:
+    """Unit: enroll-ranges validation produces clear errors for bad inputs."""
+
+    def test_missing_range_fails_with_clear_error(self, tmp_path, capsys):
+        # Arrange: valid session but no --range.
+        session = tmp_path / "session"
+        session.mkdir()
+        _write_transcript(session / "transcript.json", [_seg(4, 0.0, 10.0, "hi")])
+        # Act / Assert
+        with pytest.raises(SystemExit) as exc:
+            helper.main(
+                [
+                    "enroll-ranges",
+                    "--session", str(session),
+                    "--speaker-id", "4",
+                    "--name", "Domingo",
+                ]
+            )
+        # die() raises SystemExit with a message string (code is the message).
+        assert exc.value.code and "range" in str(exc.value.code).lower()
+
+    def test_missing_session_dir_fails_with_clear_error(self, tmp_path):
+        # Arrange: session directory does not exist.
+        # Act / Assert
+        with pytest.raises(SystemExit) as exc:
+            helper.main(
+                [
+                    "enroll-ranges",
+                    "--session", str(tmp_path / "nope"),
+                    "--speaker-id", "4",
+                    "--range", "0-5",
+                    "--name", "Domingo",
+                ]
+            )
+        assert "Session directory not found" in str(exc.value.code)
+
+    def test_missing_transcript_fails_with_clear_error(self, tmp_path):
+        # Arrange: session dir exists but no transcript.json.
+        session = tmp_path / "session"
+        session.mkdir()
+        # Act / Assert
+        with pytest.raises(SystemExit) as exc:
+            helper.main(
+                [
+                    "enroll-ranges",
+                    "--session", str(session),
+                    "--speaker-id", "4",
+                    "--range", "0-5",
+                    "--name", "Domingo",
+                ]
+            )
+        assert "Transcript not found" in str(exc.value.code)
+
+    def test_unknown_speaker_id_fails_with_clear_error(self, tmp_path):
+        # Arrange: transcript exists but speaker 99 is absent.
+        session = tmp_path / "session"
+        session.mkdir()
+        _write_transcript(session / "transcript.json", [_seg(4, 0.0, 10.0, "hi")])
+        # Act / Assert
+        with pytest.raises(SystemExit) as exc:
+            helper.main(
+                [
+                    "enroll-ranges",
+                    "--session", str(session),
+                    "--speaker-id", "99",
+                    "--range", "0-5",
+                    "--name", "Domingo",
+                ]
+            )
+        assert "99" in str(exc.value.code)
+
+    def test_speaker_with_no_useful_speech_in_ranges_fails(self, tmp_path):
+        # Arrange: speaker has speech only in 0-10, but requested range is far away.
+        session = tmp_path / "session"
+        session.mkdir()
+        _write_transcript(session / "transcript.json", [_seg(4, 0.0, 10.0, "hi")])
+        # Act / Assert
+        with pytest.raises(SystemExit) as exc:
+            helper.main(
+                [
+                    "enroll-ranges",
+                    "--session", str(session),
+                    "--speaker-id", "4",
+                    "--range", "100-200",
+                    "--name", "Domingo",
+                ]
+            )
+        assert "no useful speech" in str(exc.value.code).lower()
+
+    def test_invalid_source_value_fails(self, tmp_path):
+        # Arrange: --source value is neither mic nor system.
+        session = tmp_path / "session"
+        session.mkdir()
+        _write_transcript(session / "transcript.json", [_seg(4, 0.0, 10.0, "hi")])
+        # Act / Assert
+        with pytest.raises(SystemExit) as exc:
+            helper.main(
+                [
+                    "enroll-ranges",
+                    "--session", str(session),
+                    "--speaker-id", "4",
+                    "--range", "0-5",
+                    "--name", "Domingo",
+                    "--source", "telepathy",
+                ]
+            )
+        assert "mic" in str(exc.value.code) and "system" in str(exc.value.code)
+
+
+class TestEnrollRangesDryRunEndToEnd:
+    """Integration/e2e: enroll-ranges --no-enroll dry-run against a fixture."""
+
+    def _make_session(self, tmp_path: Path, segments) -> Path:
+        session = tmp_path / "session"
+        session.mkdir()
+        _write_transcript(session / "transcript.json", segments)
+        return session
+
+    def test_dry_run_output_is_valid_json_with_required_fields(
+        self, tmp_path, capsys
+    ):
+        # Arrange: speaker 4 has speech in 0-5 and 10-15.
+        segments = [
+            _seg(4, 0.0, 5.0, "hello world"),
+            _seg(4, 10.0, 15.0, "more speech"),
+        ]
+        session = self._make_session(tmp_path, segments)
+        # Act
+        helper.main(
+            [
+                "enroll-ranges",
+                "--session", str(session),
+                "--speaker-id", "4",
+                "--range", "2-12",
+                "--name", "Domingo",
+                "--no-enroll",
+            ]
+        )
+        # Assert: JSON output includes required fields.
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["action"] == "enroll-ranges"
+        assert payload["status"] == "dry_run"
+        assert payload["session"] == str(session.resolve())
+        assert payload["speaker_id"] == "4"
+        assert payload["name"] == "Domingo"
+        assert payload["source"] == "system"
+        # requested_ranges is a list (JSON round-trips tuples to lists).
+        assert payload["requested_ranges"] == [[2.0, 12.0]]
+        assert payload["selected_segment_count"] >= 1
+        assert payload["selected_speech_seconds"] > 0.0
+
+    def test_dry_run_output_contains_no_profile_mutation_fields(
+        self, tmp_path, capsys
+    ):
+        # Arrange
+        segments = [_seg(4, 0.0, 10.0, "hello world")]
+        session = self._make_session(tmp_path, segments)
+        # Act
+        helper.main(
+            [
+                "enroll-ranges",
+                "--session", str(session),
+                "--speaker-id", "4",
+                "--range", "2-8",
+                "--name", "Domingo",
+                "--no-enroll",
+            ]
+        )
+        # Assert: explicit no-mutation markers + no enrollment process fields.
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["mutated_profiles"] is False
+        assert payload["mutated_audio"] is False
+        assert payload["no_enroll"] is True
+        assert "returncode" not in payload
+        assert "stdout" not in payload
+        assert "filtered_transcript" not in payload
+
+    def test_dry_run_does_not_write_any_files(self, tmp_path, capsys):
+        # Arrange
+        segments = [_seg(4, 0.0, 10.0, "hello world")]
+        session = self._make_session(tmp_path, segments)
+        names_before = sorted(p.name for p in session.iterdir())
+        # Act
+        helper.main(
+            [
+                "enroll-ranges",
+                "--session", str(session),
+                "--speaker-id", "4",
+                "--range", "2-8",
+                "--name", "Domingo",
+                "--no-enroll",
+            ]
+        )
+        capsys.readouterr()  # drain
+        # Assert: nothing written — no clips dir, no audit, no profiles.
+        names_after = sorted(p.name for p in session.iterdir())
+        assert names_before == names_after
+        assert not (session / ".speaker-clips").exists()
+        assert not (session / helper.AUDIT_FILENAME).exists()
+
+    def test_dry_run_without_no_enroll_flag_is_also_safe(self, tmp_path, capsys):
+        """This version implements ONLY dry-run behavior; omitting --no-enroll
+        must still NOT enroll (the flag is accepted but is the only mode)."""
+        # Arrange
+        segments = [_seg(4, 0.0, 10.0, "hello world")]
+        session = self._make_session(tmp_path, segments)
+        # Act
+        helper.main(
+            [
+                "enroll-ranges",
+                "--session", str(session),
+                "--speaker-id", "4",
+                "--range", "2-8",
+                "--name", "Domingo",
+                # no --no-enroll
+            ]
+        )
+        # Assert: still a dry run; nothing written.
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "dry_run"
+        assert not (session / ".speaker-clips").exists()
+
+    def test_source_override_is_respected(self, tmp_path, capsys):
+        # Arrange: transcript source is 'system' but --source mic overrides.
+        segments = [_seg(4, 0.0, 10.0, "hi", source="system")]
+        session = self._make_session(tmp_path, segments)
+        # Act
+        helper.main(
+            [
+                "enroll-ranges",
+                "--session", str(session),
+                "--speaker-id", "4",
+                "--range", "2-8",
+                "--name", "Domingo",
+                "--source", "mic",
+            ]
+        )
+        # Assert
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["source"] == "mic"
+
+    def test_source_resolved_from_transcript_when_omitted(self, tmp_path, capsys):
+        # Arrange: transcript segments carry source='mic'.
+        segments = [_seg(4, 0.0, 10.0, "hi", source="mic")]
+        session = self._make_session(tmp_path, segments)
+        # Act
+        helper.main(
+            [
+                "enroll-ranges",
+                "--session", str(session),
+                "--speaker-id", "4",
+                "--range", "2-8",
+                "--name", "Domingo",
+            ]
+        )
+        # Assert
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["source"] == "mic"
+
+    def test_multiple_ranges_select_disjoint_speech(self, tmp_path, capsys):
+        # Arrange: two disjoint ranges, each with useful speech.
+        segments = [
+            _seg(4, 0.0, 5.0, "a"),
+            _seg(4, 100.0, 105.0, "b"),
+        ]
+        session = self._make_session(tmp_path, segments)
+        # Act
+        helper.main(
+            [
+                "enroll-ranges",
+                "--session", str(session),
+                "--speaker-id", "4",
+                "--range", "0-5",
+                "--range", "100-105",
+                "--name", "Domingo",
+            ]
+        )
+        # Assert: both ranges selected speech.
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["selected_segment_count"] == 2
+        assert payload["selected_ranges"] == [[0.0, 5.0], [100.0, 105.0]]
+
+    def test_next_step_recommends_task_03b(self, tmp_path, capsys):
+        # Arrange
+        segments = [_seg(4, 0.0, 10.0, "hi")]
+        session = self._make_session(tmp_path, segments)
+        # Act
+        helper.main(
+            [
+                "enroll-ranges",
+                "--session", str(session),
+                "--speaker-id", "4",
+                "--range", "2-8",
+                "--name", "Domingo",
+            ]
+        )
+        # Assert: a recommended next implementation step is present.
+        payload = json.loads(capsys.readouterr().out)
+        assert "next_step" in payload and payload["next_step"]
+        assert "03b" in payload["next_step"]
