@@ -1,12 +1,19 @@
 """Tests for the meeting speaker-naming helper (``name_one_speaker.py``).
 
-These cover the Task 04 ``purity-preview`` deliverable:
+These cover the Task 04 ``purity-preview`` deliverable and the Task 05
+``audit`` deliverable:
 
 - Unit: chronological window selection (``select_purity_windows``) for short,
   medium, and long clusters.
 - Unit: bracket-only segments do not produce preview windows.
 - Integration/e2e: ``purity-preview --no-play`` against a fixture session
   produces all expected clip metadata without mutating profiles/transcripts.
+- Unit: audit safety classification for pure, mixed, short, and no-useful-speech
+  clusters.
+- Unit: audit JSON schema includes required fields for each speaker.
+- Integration/e2e: ``audit`` against a fixture session writes
+  ``speaker_audit.json`` without modifying transcripts or profiles, and ``list``
+  surfaces audit status when the artifact exists.
 
 The helper lives outside this repo (in the Pi skills directory) and runs under
 the system python3, so tests import it via ``sys.path``. The path is taken from
@@ -509,3 +516,400 @@ class TestPurityPreviewEndToEnd:
                     "--no-play",
                 ]
             )
+
+
+# ===========================================================================
+# Task 05: Speaker audit -- safety classification unit tests
+# ===========================================================================
+
+
+class TestClassifySpeakerSafety:
+    """Unit tests for ``classify_speaker_safety`` covering pure, mixed, short,
+    and no-useful-speech clusters."""
+
+    def _selection(self, segments, speaker_id):
+        return helper.select_purity_windows(segments, speaker_id, preview_seconds=12.0)
+
+    def test_no_useful_speech_is_unknown_and_unsafe(self):
+        segments = [_seg(4, 0.0, 5.0, "[Silence]")]
+        result = helper.classify_speaker_safety(self._selection(segments, "4"))
+        assert result["status"] == "unknown"
+        assert result["safe_to_enroll_whole_cluster"] is False
+        assert "no_useful_speech" in result["reasons"]
+
+    def test_short_useful_speech_is_unknown_and_unsafe(self):
+        # 2s of useful speech, below the default 5s minimum.
+        segments = [_seg(4, 0.0, 2.0, "hi")]
+        result = helper.classify_speaker_safety(self._selection(segments, "4"))
+        assert result["status"] == "unknown"
+        assert result["safe_to_enroll_whole_cluster"] is False
+
+    def test_compact_cluster_is_pure_likely_and_safe(self):
+        # 12s of contiguous speech: span == speech, ratio 1.0 -> pure.
+        segments = [_seg(1, 0.0, 4.0, "a"), _seg(1, 4.0, 8.0, "b"), _seg(1, 8.0, 12.0, "c")]
+        result = helper.classify_speaker_safety(self._selection(segments, "1"))
+        assert result["status"] == "pure_likely"
+        assert result["safe_to_enroll_whole_cluster"] is True
+
+    def test_long_widely_spread_cluster_is_mixed_suspected_and_unsafe(self):
+        # 40 segments of 5s spread over ~4000s: ratio ~19.5 -> mixed.
+        segments = [_seg(4, i * 100.0, i * 100.0 + 5.0, f"u{i}") for i in range(40)]
+        result = helper.classify_speaker_safety(self._selection(segments, "4"))
+        assert result["status"] == "mixed_suspected"
+        assert result["safe_to_enroll_whole_cluster"] is False
+        assert any("ratio" in r for r in result["reasons"])
+
+    def test_dense_long_cluster_is_pure_likely(self):
+        # Long timeline but densely packed: span close to speech -> pure.
+        segments = [_seg(1, i * 6.0, i * 6.0 + 5.0, f"u{i}") for i in range(40)]
+        result = helper.classify_speaker_safety(self._selection(segments, "1"))
+        assert result["status"] == "pure_likely"
+        assert result["safe_to_enroll_whole_cluster"] is True
+
+    def test_mixed_span_ratio_threshold_is_respected(self):
+        # Same long cluster; raising the threshold above its ratio -> pure.
+        segments = [_seg(4, i * 100.0, i * 100.0 + 5.0, f"u{i}") for i in range(40)]
+        sel = self._selection(segments, "4")
+        loose = helper.classify_speaker_safety(sel, mixed_span_ratio=50.0)
+        assert loose["status"] == "pure_likely"
+        assert loose["safe_to_enroll_whole_cluster"] is True
+
+    def test_min_useful_speech_threshold_is_respected(self):
+        # 8s of speech is pure under default min 5s, but unknown under min 10s.
+        segments = [_seg(1, 0.0, 8.0, "hello there")]
+        sel = self._selection(segments, "1")
+        assert helper.classify_speaker_safety(sel)["status"] == "pure_likely"
+        strict = helper.classify_speaker_safety(sel, min_useful_speech=10.0)
+        assert strict["status"] == "unknown"
+        assert strict["safe_to_enroll_whole_cluster"] is False
+
+
+class TestSpeakerTimestamps:
+    def test_returns_none_for_no_useful_speech(self):
+        segments = [_seg(4, 0.0, 5.0, "[Silence]")]
+        assert helper.speaker_timestamps(segments, "4") == {
+            "first": None,
+            "middle": None,
+            "last": None,
+        }
+
+    def test_first_and_last_bound_the_speech(self):
+        segments = [_seg(1, 10.0, 15.0, "a"), _seg(1, 100.0, 105.0, "b")]
+        ts = helper.speaker_timestamps(segments, "1")
+        assert ts["first"] == 10.0
+        assert ts["last"] == 105.0
+        # Middle lands inside actual speech (cumulative midpoint at 5s of 10s).
+        assert 10.0 <= ts["middle"] <= 105.0
+
+
+class TestBuildSpeakerAudit:
+    """Unit tests for audit summary generation and JSON schema."""
+
+    REQUIRED_FIELDS = {
+        "speaker_id",
+        "source",
+        "speaker_name",
+        "segments",
+        "useful_segments",
+        "speech_seconds",
+        "useful_speech_seconds",
+        "first_timestamp",
+        "middle_timestamp",
+        "last_timestamp",
+        "span_seconds",
+        "examples",
+        "purity_windows",
+        "status",
+        "safe_to_enroll_whole_cluster",
+        "reasons",
+        "recommendation",
+    }
+
+    def test_audit_includes_required_fields_for_each_speaker(self):
+        segments = [
+            *[_seg(4, i * 100.0, i * 100.0 + 5.0, f"u{i}") for i in range(40)],
+            _seg(1, 0.0, 8.0, "pure"),
+            _seg(2, 0.0, 3.0, "[Silence]"),
+        ]
+        audit = helper.build_speaker_audit(segments)
+        assert len(audit) == 3
+        for entry in audit:
+            missing = self.REQUIRED_FIELDS - set(entry.keys())
+            assert not missing, f"missing fields: {missing}"
+            assert entry["status"] in {"unknown", "pure_likely", "mixed_suspected"}
+            assert isinstance(entry["safe_to_enroll_whole_cluster"], bool)
+            assert isinstance(entry["reasons"], list) and entry["reasons"]
+            assert isinstance(entry["recommendation"], str) and entry["recommendation"]
+
+    def test_audit_classifies_mixed_pure_and_unknown_clusters(self):
+        segments = [
+            *[_seg(4, i * 100.0, i * 100.0 + 5.0, f"u{i}") for i in range(40)],
+            *[_seg(1, i * 4.0, i * 4.0 + 4.0, f"p{i}") for i in range(3)],
+            _seg(2, 0.0, 3.0, "[Silence]"),
+        ]
+        audit = helper.build_speaker_audit(segments)
+        by_id = {e["speaker_id"]: e for e in audit}
+        assert by_id["4"]["status"] == "mixed_suspected"
+        assert by_id["4"]["safe_to_enroll_whole_cluster"] is False
+        assert by_id["1"]["status"] == "pure_likely"
+        assert by_id["1"]["safe_to_enroll_whole_cluster"] is True
+        assert by_id["2"]["status"] == "unknown"
+        assert by_id["2"]["safe_to_enroll_whole_cluster"] is False
+
+    def test_every_speaker_with_useful_speech_gets_a_recommendation(self):
+        segments = [
+            _seg(1, 0.0, 8.0, "a"),
+            _seg(2, 0.0, 8.0, "b"),
+            _seg(3, 0.0, 3.0, "[Music]"),
+        ]
+        audit = helper.build_speaker_audit(segments)
+        # Speakers 1 and 2 have useful speech -> pure_likely with recommendation.
+        useful = [e for e in audit if e["useful_speech_seconds"] > 0]
+        assert len(useful) == 2
+        for e in useful:
+            assert e["status"] != "unknown" or e["useful_speech_seconds"] < 5.0
+            assert e["recommendation"]
+
+    def test_audit_is_deterministic_for_same_input(self):
+        segments = [
+            *[_seg(4, i * 100.0, i * 100.0 + 5.0, f"u{i}") for i in range(40)],
+            _seg(1, 0.0, 8.0, "pure"),
+        ]
+        first = json.dumps(helper.build_speaker_audit(segments), sort_keys=True)
+        second = json.dumps(helper.build_speaker_audit(segments), sort_keys=True)
+        assert first == second
+
+    def test_purity_windows_are_summarized_compactly(self):
+        segments = [_seg(4, i * 100.0, i * 100.0 + 5.0, f"u{i}") for i in range(40)]
+        audit = helper.build_speaker_audit(segments)
+        entry = audit[0]
+        labels = [w["label"] for w in entry["purity_windows"]]
+        assert labels == ["early", "middle", "late"]
+        # Compact summary must not carry the verbose raw ranges list.
+        for w in entry["purity_windows"]:
+            assert "ranges" not in w
+            assert {"label", "start", "end"} <= set(w.keys())
+
+
+class TestAuditArgParsing:
+    def test_required_args_and_defaults(self):
+        parser = helper.build_parser()
+        args = parser.parse_args(["audit", "--session", "/tmp/s"])
+        assert args.session == "/tmp/s"
+        assert args.force is False
+        assert args.json is None
+        assert args.min_useful_speech == helper.DEFAULT_AUDIT_MIN_USEFUL_SPEECH
+        assert args.mixed_span_ratio == helper.DEFAULT_AUDIT_MIXED_SPAN_RATIO
+
+    def test_optional_thresholds_and_flags(self):
+        parser = helper.build_parser()
+        args = parser.parse_args(
+            [
+                "audit",
+                "--session", "/tmp/s",
+                "--force",
+                "--min-useful-speech", "10",
+                "--mixed-span-ratio", "5.0",
+                "--json", "/tmp/out/audit.json",
+            ]
+        )
+        assert args.force is True
+        assert args.min_useful_speech == 10.0
+        assert args.mixed_span_ratio == 5.0
+        assert args.json == "/tmp/out/audit.json"
+
+    def test_func_is_do_audit(self):
+        parser = helper.build_parser()
+        args = parser.parse_args(["audit", "--session", "/tmp/s"])
+        assert args.func is helper.do_audit
+
+
+# ===========================================================================
+# Integration / e2e: audit against a fixture session
+# ===========================================================================
+
+
+class TestAuditEndToEnd:
+    """Run the real ``audit`` command against a fixture session and verify
+    ``speaker_audit.json`` is created without modifying transcripts or profiles."""
+
+    def _make_session(self, tmp_path: Path, segments) -> Path:
+        session = tmp_path / "session"
+        session.mkdir()
+        _write_transcript(session / "transcript.json", segments)
+        return session
+
+    def test_creates_speaker_audit_json_with_required_top_level_fields(
+        self, tmp_path, capsys
+    ):
+        segments = [
+            *[_seg(4, i * 100.0, i * 100.0 + 5.0, f"u{i}") for i in range(40)],
+            _seg(1, 0.0, 8.0, "pure"),
+        ]
+        session = self._make_session(tmp_path, segments)
+
+        helper.main(["audit", "--session", str(session)])
+        capsys.readouterr()
+
+        audit_path = session / helper.AUDIT_FILENAME
+        assert audit_path.exists()
+        artifact = json.loads(audit_path.read_text(encoding="utf-8"))
+        assert "speakers" in artifact
+        assert "safe_to_enroll_whole_cluster" in artifact
+        assert isinstance(artifact["speakers"], list)
+        assert len(artifact["speakers"]) == 2
+
+    def test_does_not_modify_transcript(self, tmp_path, capsys):
+        segments = [
+            *[_seg(4, i * 100.0, i * 100.0 + 5.0, f"u{i}") for i in range(40)],
+            _seg(1, 0.0, 8.0, "pure"),
+        ]
+        session = self._make_session(tmp_path, segments)
+        transcript_path = session / "transcript.json"
+        before = transcript_path.read_bytes()
+
+        helper.main(["audit", "--session", str(session)])
+        capsys.readouterr()
+
+        assert transcript_path.read_bytes() == before
+        # Only audit artifact should be created (no profiles, no clips).
+        new_files = [p.name for p in session.iterdir()]
+        assert helper.AUDIT_FILENAME in new_files
+        assert "transcript.json" in new_files
+
+    def test_mixed_suspected_not_marked_safe(self, tmp_path, capsys):
+        segments = [_seg(4, i * 100.0, i * 100.0 + 5.0, f"u{i}") for i in range(40)]
+        session = self._make_session(tmp_path, segments)
+
+        helper.main(["audit", "--session", str(session)])
+        capsys.readouterr()
+        artifact = json.loads((session / helper.AUDIT_FILENAME).read_text())
+        speaker = artifact["speakers"][0]
+        assert speaker["status"] == "mixed_suspected"
+        assert speaker["safe_to_enroll_whole_cluster"] is False
+        # Aggregate flag is false when any speaker is unsafe.
+        assert artifact["safe_to_enroll_whole_cluster"] is False
+
+    def test_pure_cluster_aggregate_safe_flag(self, tmp_path, capsys):
+        segments = [_seg(1, 0.0, 8.0, "pure speaker")]
+        session = self._make_session(tmp_path, segments)
+
+        helper.main(["audit", "--session", str(session)])
+        capsys.readouterr()
+        artifact = json.loads((session / helper.AUDIT_FILENAME).read_text())
+        assert artifact["speakers"][0]["safe_to_enroll_whole_cluster"] is True
+        assert artifact["safe_to_enroll_whole_cluster"] is True
+
+    def test_deterministic_output_for_same_transcript(self, tmp_path):
+        segments = [
+            *[_seg(4, i * 100.0, i * 100.0 + 5.0, f"u{i}") for i in range(40)],
+            _seg(1, 0.0, 8.0, "pure"),
+        ]
+        session = self._make_session(tmp_path, segments)
+
+        helper.main(["audit", "--session", str(session)])
+        first = (session / helper.AUDIT_FILENAME).read_text()
+        # Force recompute.
+        helper.main(["audit", "--session", str(session), "--force"])
+        second = (session / helper.AUDIT_FILENAME).read_text()
+        assert first == second
+
+    def test_force_recomputes_when_artifact_exists(self, tmp_path, capsys):
+        segments = [_seg(1, 0.0, 8.0, "pure")]
+        session = self._make_session(tmp_path, segments)
+
+        helper.main(["audit", "--session", str(session)])
+        capsys.readouterr()
+        first_mtime = (session / helper.AUDIT_FILENAME).stat().st_mtime
+
+        # Without --force, a cached artifact is reused (no recompute path).
+        helper.main(["audit", "--session", str(session)])
+        capsys.readouterr()
+        # --force must succeed and rewrite (may keep same content but runs).
+        helper.main(["audit", "--session", str(session), "--force"])
+        capsys.readouterr()
+        assert (session / helper.AUDIT_FILENAME).exists()
+
+    def test_json_output_path_is_written(self, tmp_path, capsys):
+        segments = [_seg(1, 0.0, 8.0, "pure")]
+        session = self._make_session(tmp_path, segments)
+        custom = tmp_path / "custom" / "out.json"
+
+        helper.main(
+            ["audit", "--session", str(session), "--json", str(custom)]
+        )
+        capsys.readouterr()
+        assert custom.exists()
+        copy = json.loads(custom.read_text())
+        canonical = json.loads((session / helper.AUDIT_FILENAME).read_text())
+        assert copy == canonical
+
+    def test_custom_thresholds_change_classification(self, tmp_path, capsys):
+        # 8s compact cluster is pure under defaults, unknown under min 10s.
+        segments = [_seg(1, 0.0, 8.0, "pure")]
+        session = self._make_session(tmp_path, segments)
+
+        helper.main(
+            ["audit", "--session", str(session), "--force", "--min-useful-speech", "10"]
+        )
+        capsys.readouterr()
+        artifact = json.loads((session / helper.AUDIT_FILENAME).read_text())
+        assert artifact["speakers"][0]["status"] == "unknown"
+        assert artifact["thresholds"]["min_useful_speech"] == 10.0
+
+    def test_stdout_output_is_machine_readable(self, tmp_path, capsys):
+        segments = [_seg(1, 0.0, 8.0, "pure")]
+        session = self._make_session(tmp_path, segments)
+
+        helper.main(["audit", "--session", str(session)])
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["action"] == "audit"
+        assert payload["session"] == str(session.resolve())
+        assert "speakers" in payload
+
+
+class TestListWithAudit:
+    """``list`` surfaces audit safety status when the audit artifact exists."""
+
+    def _make_session(self, tmp_path: Path, segments) -> Path:
+        session = tmp_path / "session"
+        session.mkdir()
+        _write_transcript(session / "transcript.json", segments)
+        return session
+
+    def test_list_shows_audit_status_when_artifact_exists(self, tmp_path, capsys):
+        segments = [
+            *[_seg(4, i * 100.0, i * 100.0 + 5.0, f"u{i}") for i in range(40)],
+            _seg(1, 0.0, 8.0, "pure"),
+        ]
+        session = self._make_session(tmp_path, segments)
+
+        # No audit yet -> audit_available False.
+        helper.main(["list", "--session", str(session), "--all"])
+        before = json.loads(capsys.readouterr().out)
+        assert before["audit_available"] is False
+        assert before["audit_path"] is None
+        for s in before["speakers"]:
+            assert "audit" not in s
+
+        # Run audit, then list again.
+        helper.main(["audit", "--session", str(session)])
+        capsys.readouterr()
+        helper.main(["list", "--session", str(session), "--all"])
+        after = json.loads(capsys.readouterr().out)
+        assert after["audit_available"] is True
+        assert after["audit_path"] == str((session / helper.AUDIT_FILENAME).resolve())
+        by_id = {s["speaker_id"]: s for s in after["speakers"]}
+        assert by_id["4"]["audit"]["status"] == "mixed_suspected"
+        assert by_id["4"]["audit"]["safe_to_enroll_whole_cluster"] is False
+        assert by_id["1"]["audit"]["status"] == "pure_likely"
+        assert by_id["1"]["audit"]["safe_to_enroll_whole_cluster"] is True
+
+    def test_list_without_audit_has_no_audit_fields(self, tmp_path, capsys):
+        segments = [_seg(1, 0.0, 8.0, "pure")]
+        session = self._make_session(tmp_path, segments)
+        helper.main(["list", "--session", str(session), "--all"])
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["audit_available"] is False
+        for s in payload["speakers"]:
+            assert "audit" not in s
