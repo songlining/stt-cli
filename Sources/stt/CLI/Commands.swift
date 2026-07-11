@@ -1928,8 +1928,12 @@ public struct NameSpeakers: ParsableCommand {
             var chosenName: String?
             speakerLoop: while true {
                 print("\nSpeaker \(speakerID) (\(source), \(String(format: "%.0f", concat.durationSeconds))s, \(concat.segmentCount) segments)")
-                print("Playing \(String(format: "%.0f", previewSeconds))s sample...")
-                Self.playAudioSample(at: clipURL.path, seconds: previewSeconds)
+                if previewSeconds > 0 {
+                    print("Playing \(String(format: "%.0f", previewSeconds))s sample...")
+                    Self.playAudioSample(at: clipURL.path, seconds: previewSeconds)
+                } else {
+                    print("(preview skipped: --preview-seconds 0)")
+                }
                 print("[name] enroll as  |  [r] replay  |  [s] skip")
                 guard let line = readLine()?.trimmingCharacters(in: .whitespaces), !line.isEmpty else {
                     print("Skipping Speaker \(speakerID) (no name given).")
@@ -2018,6 +2022,11 @@ public struct NameSpeakers: ParsableCommand {
     /// print a warning with the clip path but never abort the command, so the
     /// user can still name/enroll a speaker without hearing the preview.
     private static func playAudioSample(at path: String, seconds: Double) {
+        // afplay's `-t TIME` means "play for TIME seconds"; `-t 0` is treated
+        // as no limit (i.e. it plays the entire file), not silence. Callers
+        // that want no preview (e.g. `--preview-seconds 0`) must skip calling
+        // this entirely rather than relying on afplay to no-op.
+        guard seconds > 0 else { return }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/afplay")
         process.arguments = ["-t", String(format: "%.0f", seconds), path]
