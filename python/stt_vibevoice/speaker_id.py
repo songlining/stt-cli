@@ -322,12 +322,130 @@ def embed_audio_files(audio_paths: Sequence[Path], provider: str) -> Tuple[List[
 
 
 # ---------------------------------------------------------------------------
+# Time range parsing
+# ---------------------------------------------------------------------------
+
+
+def _parse_timestamp(value: str) -> float:
+    """Parses a single timestamp into floating-point seconds.
+
+    Accepts three formats:
+      - Plain seconds (with optional fractional part): ``123.4``, ``180``
+      - ``MM:SS``: ``02:03`` -> 123.0
+      - ``HH:MM:SS``: ``00:41:30`` -> 2490.0
+
+    Raises ``SpeakerIdError`` with a clear message for invalid input; the
+    message always echoes the offending value so CLI users can locate the
+    bad token.
+    """
+    text = value.strip()
+    if not text:
+        raise SpeakerIdError(f"Invalid timestamp (empty value): {value!r}")
+    parts = text.split(":")
+    if len(parts) == 1:
+        token = parts[0]
+        try:
+            seconds = float(token)
+        except ValueError as error:
+            raise SpeakerIdError(
+                f"Invalid timestamp {value!r}: expected seconds (e.g. 123.4), "
+                f"MM:SS, or HH:MM:SS."
+            ) from error
+        if seconds < 0:
+            raise SpeakerIdError(f"Invalid timestamp {value!r}: must not be negative.")
+        return seconds
+    if len(parts) == 2:
+        minutes_str, seconds_str = parts
+        try:
+            minutes = int(minutes_str)
+            seconds = float(seconds_str)
+        except ValueError as error:
+            raise SpeakerIdError(
+                f"Invalid timestamp {value!r}: expected MM:SS with numeric minutes/seconds."
+            ) from error
+        if minutes < 0 or seconds < 0:
+            raise SpeakerIdError(f"Invalid timestamp {value!r}: must not be negative.")
+        return minutes * 60.0 + seconds
+    if len(parts) == 3:
+        hours_str, minutes_str, seconds_str = parts
+        try:
+            hours = int(hours_str)
+            minutes = int(minutes_str)
+            seconds = float(seconds_str)
+        except ValueError as error:
+            raise SpeakerIdError(
+                f"Invalid timestamp {value!r}: expected HH:MM:SS with numeric fields."
+            ) from error
+        if hours < 0 or minutes < 0 or seconds < 0:
+            raise SpeakerIdError(f"Invalid timestamp {value!r}: must not be negative.")
+        return hours * 3600.0 + minutes * 60.0 + seconds
+    raise SpeakerIdError(
+        f"Invalid timestamp {value!r}: too many ':' fields (expected seconds, MM:SS, or HH:MM:SS)."
+    )
+
+
+def parse_time_range(value: str) -> Tuple[float, float]:
+    """Parses a ``start-end`` time range string into ``(start, end)`` seconds.
+
+    Accepts seconds (``123.4-180.0``), ``MM:SS-MM:SS`` (``02:03-03:00``), and
+    ``HH:MM:SS-HH:MM:SS`` (``00:41:30-00:57:00``). Each side may independently
+    use any of the timestamp formats accepted by ``_parse_timestamp``.
+
+    Raises ``SpeakerIdError`` if the value is missing the ``-`` separator,
+    if either timestamp is malformed, or if ``start >= end``.
+    """
+    if value is None:
+        raise SpeakerIdError("Invalid time range: got None.")
+    text = str(value).strip()
+    if "-" not in text:
+        raise SpeakerIdError(
+            f"Invalid time range {value!r}: expected 'start-end' (e.g. '123.4-180.0', '02:03-03:00')."
+        )
+    # Split on the *first* dash so that negative seconds like "-1-2" are not
+    # misinterpreted; timestamps here are never negative, so the left side is
+    # everything up to the first dash and the right side is the rest.
+    dash_index = text.index("-")
+    start_str = text[:dash_index]
+    end_str = text[dash_index + 1 :]
+    if not start_str or not end_str:
+        raise SpeakerIdError(
+            f"Invalid time range {value!r}: both start and end are required."
+        )
+    start = _parse_timestamp(start_str)
+    end = _parse_timestamp(end_str)
+    if start >= end:
+        raise SpeakerIdError(
+            f"Invalid time range {value!r}: start ({start}) must be strictly less than end ({end})."
+        )
+    return (start, end)
+
+
+def parse_time_ranges(values: Optional[Sequence[str]]) -> List[Tuple[float, float]]:
+    """Parses repeated ``--range`` values into a validated list of ranges.
+
+    Each value is parsed with ``parse_time_range``. Returns an empty list when
+    ``values`` is ``None`` or empty. Ranges are returned in the order given
+    (callers may sort/merge as needed for their use case).
+    """
+    if not values:
+        return []
+    parsed: List[Tuple[float, float]] = []
+    for raw in values:
+        parsed.append(parse_time_range(str(raw)))
+    return parsed
+
+
+# ---------------------------------------------------------------------------
 # Segment selection
 # ---------------------------------------------------------------------------
 
 
 def select_speaker_segments(
-    segments: Sequence[dict], speaker_id: str, *, skip_nonspeech: bool = True
+    segments: Sequence[dict],
+    speaker_id: str,
+    *,
+    skip_nonspeech: bool = True,
+    ranges: Optional[Sequence[Tuple[float, float]]] = None,
 ) -> List[Tuple[float, float]]:
     """Selects (start, end) ranges for a given diarized ``speaker_id``.
 
@@ -337,8 +455,46 @@ def select_speaker_segments(
     (``[Silence]``, ``[Environmental Sounds]``, ``[Human Sounds]``, …) are
     skipped, so preview clips and embeddings are built from actual speech
     rather than dead air or mouse-clicking noise.
+
+    When ``ranges`` is provided, each speaker segment is *intersected* with
+    the requested ranges, clipping to the actual segment boundaries rather
+    than including full segments that extend outside the requested interval.
+    A requested range that overlaps no matching speaker segment contributes
+    nothing. Intersected pieces shorter than ``MINIMUM_SEGMENT_SECONDS`` are
+    dropped. When ``ranges`` is ``None`` (the default), behavior is identical
+    to the pre-range implementation, preserving backward compatibility for
+    existing callers.
     """
-    ranges: List[Tuple[float, float]] = []
+    if ranges is not None:
+        ranges_list: List[Tuple[float, float]] = [
+            (float(s), float(e)) for s, e in ranges
+        ]
+        selected: List[Tuple[float, float]] = []
+        for segment in segments:
+            seg_speaker = segment.get("speaker_id")
+            if seg_speaker is None or str(seg_speaker) != str(speaker_id):
+                continue
+            if skip_nonspeech:
+                text = str(segment.get("text", "")).strip()
+                if text.startswith("[") and text.endswith("]"):
+                    continue
+            start = segment.get("start_time", segment.get("start"))
+            end = segment.get("end_time", segment.get("end"))
+            if start is None or end is None:
+                continue
+            try:
+                seg_start = float(start)
+                seg_end = float(end)
+            except (TypeError, ValueError):
+                continue
+            for req_start, req_end in ranges_list:
+                clip_start = max(seg_start, req_start)
+                clip_end = min(seg_end, req_end)
+                if clip_end - clip_start >= MINIMUM_SEGMENT_SECONDS:
+                    selected.append((clip_start, clip_end))
+        return selected
+
+    ranges_out: List[Tuple[float, float]] = []
     for segment in segments:
         seg_speaker = segment.get("speaker_id")
         if seg_speaker is None or str(seg_speaker) != str(speaker_id):
@@ -358,8 +514,77 @@ def select_speaker_segments(
             continue
         if end_f - start_f < MINIMUM_SEGMENT_SECONDS:
             continue
-        ranges.append((start_f, end_f))
-    return ranges
+        ranges_out.append((start_f, end_f))
+    return ranges_out
+
+
+def filter_speaker_segments(
+    segments: Sequence[dict],
+    speaker_id: str,
+    *,
+    ranges: Optional[Sequence[str]] = None,
+    skip_nonspeech: bool = True,
+) -> Dict[str, Any]:
+    """Selects matching speaker segments and returns structured metadata.
+
+    This is the range-aware filtering primitive for the speaker sampling /
+    enrollment safety workflow. It combines timestamp range parsing with
+    speaker-segment intersection so downstream tasks (enrollment, preview,
+    audit, label suggestions) share one source of truth for which speech
+    a given ``--speaker-id``/``--range`` selection actually covers.
+
+    Args:
+        segments: Transcript segments (each with ``speaker_id``, ``start_time``
+            / ``start``, ``end_time`` / ``end``, and optional ``text``).
+        speaker_id: Diarized speaker id to match.
+        ranges: Optional list of ``start-end`` range strings (seconds,
+            ``MM:SS``, or ``HH:MM:SS``). Parsed via ``parse_time_ranges``.
+            When ``None`` or empty, all matching speaker segments are selected
+            exactly as ``select_speaker_segments`` would (no range clipping).
+        skip_nonspeech: When True (default), bracketed non-speech event tags
+            like ``[Silence]`` are excluded.
+
+    Returns a metadata dict with the keys:
+
+      - ``speakerId``: the requested speaker id.
+      - ``requestedRanges``: parsed requested ranges (or ``None`` if none given).
+      - ``selectedRanges``: the final ``(start, end)`` ranges actually selected,
+        clipped to segment boundaries.
+      - ``selectedSegmentCount``: number of selected ranges.
+      - ``selectedSpeechSeconds``: total seconds of speech covered.
+      - ``nonspeechExcluded``: count of bracket-only segments that were skipped.
+      - ``bracketOnlyExcluded``: alias kept for clarity (same value as
+        ``nonspeechExcluded``).
+    """
+    requested = parse_time_ranges(ranges)
+    requested_ranges: Optional[List[Tuple[float, float]]] = requested or None
+
+    nonspeech_excluded = 0
+    for segment in segments:
+        seg_speaker = segment.get("speaker_id")
+        if seg_speaker is None or str(seg_speaker) != str(speaker_id):
+            continue
+        text = str(segment.get("text", "")).strip()
+        if text.startswith("[") and text.endswith("]"):
+            nonspeech_excluded += 1
+
+    selected_ranges = select_speaker_segments(
+        segments,
+        speaker_id,
+        skip_nonspeech=skip_nonspeech,
+        ranges=requested_ranges,
+    )
+    speech_seconds = sum(end - start for start, end in selected_ranges)
+
+    return {
+        "speakerId": speaker_id,
+        "requestedRanges": requested_ranges,
+        "selectedRanges": selected_ranges,
+        "selectedSegmentCount": len(selected_ranges),
+        "selectedSpeechSeconds": round(speech_seconds, 3),
+        "nonspeechExcluded": nonspeech_excluded,
+        "bracketOnlyExcluded": nonspeech_excluded,
+    }
 
 
 def cap_ranges_by_duration(ranges: List[Tuple[float, float]], max_seconds: float) -> List[Tuple[float, float]]:

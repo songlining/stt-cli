@@ -680,3 +680,334 @@ class TestRankRangesByEnergy:
         wav_path = tmp_path / "tone.wav"
         _write_wav(wav_path, _tone(1.0))
         assert wav_slicing.rank_ranges_by_energy(wav_path, []) == []
+
+
+class TestParseTimestamp:
+    """Arrange-Act-Assert tests for the internal _parse_timestamp helper."""
+
+    def test_plain_seconds_with_fraction(self):
+        # Arrange / Act
+        result = speaker_id._parse_timestamp("123.4")
+        # Assert
+        assert result == pytest.approx(123.4)
+
+    def test_plain_integer_seconds(self):
+        result = speaker_id._parse_timestamp("180")
+        assert result == pytest.approx(180.0)
+
+    def test_mmss_format(self):
+        result = speaker_id._parse_timestamp("02:03")
+        assert result == pytest.approx(123.0)  # 2*60 + 3
+
+    def test_hhmmss_format(self):
+        result = speaker_id._parse_timestamp("00:41:30")
+        assert result == pytest.approx(2490.0)  # 41*60 + 30
+
+    def test_hhmmss_with_hours(self):
+        result = speaker_id._parse_timestamp("01:02:03")
+        assert result == pytest.approx(3723.0)  # 3600 + 120 + 3
+
+    def test_negative_seconds_raises(self):
+        with pytest.raises(speaker_id.SpeakerIdError):
+            speaker_id._parse_timestamp("-5")
+
+    def test_invalid_string_raises(self):
+        with pytest.raises(speaker_id.SpeakerIdError):
+            speaker_id._parse_timestamp("abc")
+
+    def test_empty_string_raises(self):
+        with pytest.raises(speaker_id.SpeakerIdError):
+            speaker_id._parse_timestamp("")
+
+    def test_too_many_fields_raises(self):
+        with pytest.raises(speaker_id.SpeakerIdError):
+            speaker_id._parse_timestamp("1:2:3:4")
+
+
+class TestParseTimeRange:
+    """Arrange-Act-Assert tests for parse_time_range."""
+
+    def test_seconds_range(self):
+        # Arrange / Act
+        result = speaker_id.parse_time_range("123.4-180.0")
+        # Assert
+        assert result == (pytest.approx(123.4), pytest.approx(180.0))
+
+    def test_mmss_range(self):
+        result = speaker_id.parse_time_range("02:03-03:00")
+        assert result == (pytest.approx(123.0), pytest.approx(180.0))
+
+    def test_hhmmss_range(self):
+        result = speaker_id.parse_time_range("00:41:30-00:57:00")
+        assert result == (pytest.approx(2490.0), pytest.approx(3420.0))
+
+    def test_mixed_formats(self):
+        # seconds start, HH:MM:SS end
+        result = speaker_id.parse_time_range("120-00:02:30")
+        assert result == (pytest.approx(120.0), pytest.approx(150.0))
+
+    def test_missing_dash_raises(self):
+        with pytest.raises(speaker_id.SpeakerIdError):
+            speaker_id.parse_time_range("120to180")
+
+    def test_missing_end_raises(self):
+        with pytest.raises(speaker_id.SpeakerIdError):
+            speaker_id.parse_time_range("120-")
+
+    def test_missing_start_raises(self):
+        with pytest.raises(speaker_id.SpeakerIdError):
+            speaker_id.parse_time_range("-180")
+
+    def test_reversed_range_raises(self):
+        with pytest.raises(speaker_id.SpeakerIdError) as excinfo:
+            speaker_id.parse_time_range("180.0-123.4")
+        assert "strictly less than" in str(excinfo.value)
+
+    def test_equal_start_end_raises(self):
+        with pytest.raises(speaker_id.SpeakerIdError):
+            speaker_id.parse_time_range("120-120")
+
+    def test_invalid_timestamp_raises(self):
+        with pytest.raises(speaker_id.SpeakerIdError):
+            speaker_id.parse_time_range("abc-180")
+
+    def test_error_message_echoes_offending_value(self):
+        with pytest.raises(speaker_id.SpeakerIdError) as excinfo:
+            speaker_id.parse_time_range("garbage")
+        assert "garbage" in str(excinfo.value)
+
+
+class TestParseTimeRanges:
+    """Tests for parse_time_ranges (repeated values)."""
+
+    def test_none_returns_empty(self):
+        assert speaker_id.parse_time_ranges(None) == []
+
+    def test_empty_list_returns_empty(self):
+        assert speaker_id.parse_time_ranges([]) == []
+
+    def test_single_range(self):
+        result = speaker_id.parse_time_ranges(["10-20"])
+        assert result == [(10.0, 20.0)]
+
+    def test_multiple_ranges_preserve_order(self):
+        result = speaker_id.parse_time_ranges(["10-20", "30-40", "02:03-03:00"])
+        assert result == [
+            (10.0, 20.0),
+            (30.0, 40.0),
+            (123.0, 180.0),
+        ]
+
+    def test_invalid_range_propagates_error(self):
+        with pytest.raises(speaker_id.SpeakerIdError):
+            speaker_id.parse_time_ranges(["10-20", "reversed-5"])
+
+
+class TestSelectSpeakerSegmentsWithRanges:
+    """Tests for the range-intersection mode of select_speaker_segments."""
+
+    def test_no_ranges_unchanged_behavior(self):
+        # Arrange
+        segments = [
+            {"speaker_id": "0", "start_time": 0.0, "end_time": 5.0, "text": "hi"},
+            {"speaker_id": "1", "start_time": 5.0, "end_time": 10.0, "text": "yo"},
+        ]
+        # Act
+        result = speaker_id.select_speaker_segments(segments, "0", ranges=None)
+        # Assert — identical to calling without ranges
+        assert result == [(0.0, 5.0)]
+
+    def test_range_clips_to_segment_boundary(self):
+        # Arrange: a 0-10s speaker segment; request 3-7s
+        segments = [
+            {"speaker_id": "0", "start_time": 0.0, "end_time": 10.0, "text": "hi"},
+        ]
+        # Act
+        result = speaker_id.select_speaker_segments(segments, "0", ranges=[(3.0, 7.0)])
+        # Assert: clipped to requested range, not full segment
+        assert result == [(3.0, 7.0)]
+
+    def test_range_excludes_unrelated_speakers(self):
+        # Arrange: two speakers overlapping in time; range should only pick the matching speaker
+        segments = [
+            {"speaker_id": "0", "start_time": 0.0, "end_time": 10.0, "text": "speaker0"},
+            {"speaker_id": "1", "start_time": 5.0, "end_time": 15.0, "text": "speaker1"},
+        ]
+        # Act
+        result = speaker_id.select_speaker_segments(segments, "0", ranges=[(4.0, 12.0)])
+        # Assert: only speaker 0, clipped to segment boundary at 10s
+        assert result == [(4.0, 10.0)]
+
+    def test_non_overlapping_range_yields_nothing(self):
+        # Arrange
+        segments = [
+            {"speaker_id": "0", "start_time": 0.0, "end_time": 5.0, "text": "hi"},
+        ]
+        # Act: request a range entirely outside
+        result = speaker_id.select_speaker_segments(segments, "0", ranges=[(100.0, 200.0)])
+        # Assert
+        assert result == []
+
+    def test_overlapping_ranges_produce_multiple_clips(self):
+        # Arrange: two segments; two overlapping ranges
+        segments = [
+            {"speaker_id": "0", "start_time": 0.0, "end_time": 10.0, "text": "a"},
+            {"speaker_id": "0", "start_time": 20.0, "end_time": 30.0, "text": "b"},
+        ]
+        # Act
+        result = speaker_id.select_speaker_segments(
+            segments, "0", ranges=[(5.0, 8.0), (22.0, 27.0)]
+        )
+        # Assert
+        assert result == [(5.0, 8.0), (22.0, 27.0)]
+
+    def test_range_spanning_two_segments(self):
+        # Arrange: one requested range covering two segments of same speaker
+        segments = [
+            {"speaker_id": "0", "start_time": 0.0, "end_time": 5.0, "text": "a"},
+            {"speaker_id": "0", "start_time": 10.0, "end_time": 15.0, "text": "b"},
+        ]
+        # Act: range 3-12 covers part of both segments
+        result = speaker_id.select_speaker_segments(segments, "0", ranges=[(3.0, 12.0)])
+        # Assert: clipped per-segment
+        assert result == [(3.0, 5.0), (10.0, 12.0)]
+
+    def test_bracket_only_segments_excluded_with_ranges(self):
+        # Arrange
+        segments = [
+            {"speaker_id": "0", "start_time": 0.0, "end_time": 5.0, "text": "[Silence]"},
+            {"speaker_id": "0", "start_time": 5.0, "end_time": 10.0, "text": "hello"},
+        ]
+        # Act
+        result = speaker_id.select_speaker_segments(segments, "0", ranges=[(0.0, 10.0)])
+        # Assert: only the speech segment
+        assert result == [(5.0, 10.0)]
+
+    def test_clipped_piece_below_minimum_duration_dropped(self):
+        # Arrange: a segment; a range that overlaps by only 0.1s
+        segments = [
+            {"speaker_id": "0", "start_time": 0.0, "end_time": 10.0, "text": "hi"},
+        ]
+        # Act: overlap is 9.9-10.0 = 0.1s < MINIMUM_SEGMENT_SECONDS (0.5)
+        result = speaker_id.select_speaker_segments(segments, "0", ranges=[(9.9, 20.0)])
+        # Assert
+        assert result == []
+
+    def test_ranges_do_not_include_other_speakers_speech(self):
+        # Arrange: speaker 0 and 1 interleaved; range should not grab speaker 1
+        segments = [
+            {"speaker_id": "0", "start_time": 0.0, "end_time": 4.0, "text": "s0a"},
+            {"speaker_id": "1", "start_time": 4.0, "end_time": 8.0, "text": "s1"},
+            {"speaker_id": "0", "start_time": 8.0, "end_time": 12.0, "text": "s0b"},
+        ]
+        # Act: range 0-12 covers everything, but only speaker 0 segments should appear
+        result = speaker_id.select_speaker_segments(segments, "0", ranges=[(0.0, 12.0)])
+        # Assert
+        assert result == [(0.0, 4.0), (8.0, 12.0)]
+
+
+class TestFilterSpeakerSegments:
+    """Tests for the metadata-returning filter_speaker_segments helper."""
+
+    def test_no_ranges_returns_all_matching_segments(self):
+        # Arrange
+        segments = [
+            {"speaker_id": "0", "start_time": 0.0, "end_time": 3.0, "text": "hi"},
+            {"speaker_id": "1", "start_time": 3.0, "end_time": 6.0, "text": "yo"},
+            {"speaker_id": "0", "start_time": 6.0, "end_time": 9.0, "text": "bye"},
+        ]
+        # Act
+        result = speaker_id.filter_speaker_segments(segments, "0")
+        # Assert
+        assert result["speakerId"] == "0"
+        assert result["requestedRanges"] is None
+        assert result["selectedRanges"] == [(0.0, 3.0), (6.0, 9.0)]
+        assert result["selectedSegmentCount"] == 2
+        assert result["selectedSpeechSeconds"] == pytest.approx(6.0, abs=0.001)
+        assert result["nonspeechExcluded"] == 0
+
+    def test_with_ranges_clips_and_returns_metadata(self):
+        # Arrange
+        segments = [
+            {"speaker_id": "0", "start_time": 0.0, "end_time": 10.0, "text": "hi"},
+        ]
+        # Act
+        result = speaker_id.filter_speaker_segments(segments, "0", ranges=["3-7"])
+        # Assert
+        assert result["requestedRanges"] == [(3.0, 7.0)]
+        assert result["selectedRanges"] == [(3.0, 7.0)]
+        assert result["selectedSegmentCount"] == 1
+        assert result["selectedSpeechSeconds"] == pytest.approx(4.0, abs=0.001)
+
+    def test_bracket_only_excluded_and_counted(self):
+        # Arrange
+        segments = [
+            {"speaker_id": "0", "start_time": 0.0, "end_time": 3.0, "text": "[Silence]"},
+            {"speaker_id": "0", "start_time": 3.0, "end_time": 6.0, "text": "hi"},
+        ]
+        # Act
+        result = speaker_id.filter_speaker_segments(segments, "0")
+        # Assert
+        assert result["selectedRanges"] == [(3.0, 6.0)]
+        assert result["nonspeechExcluded"] == 1
+        assert result["bracketOnlyExcluded"] == 1
+
+    def test_non_matching_speaker_excluded(self):
+        # Arrange
+        segments = [
+            {"speaker_id": "0", "start_time": 0.0, "end_time": 5.0, "text": "hi"},
+            {"speaker_id": "1", "start_time": 5.0, "end_time": 10.0, "text": "yo"},
+        ]
+        # Act
+        result = speaker_id.filter_speaker_segments(segments, "1")
+        # Assert
+        assert result["selectedRanges"] == [(5.0, 10.0)]
+        assert result["selectedSegmentCount"] == 1
+
+    def test_overlapping_ranges_metadata(self):
+        # Arrange
+        segments = [
+            {"speaker_id": "0", "start_time": 0.0, "end_time": 10.0, "text": "a"},
+            {"speaker_id": "0", "start_time": 20.0, "end_time": 30.0, "text": "b"},
+        ]
+        # Act
+        result = speaker_id.filter_speaker_segments(
+            segments, "0", ranges=["5-8", "22-27"]
+        )
+        # Assert
+        assert result["requestedRanges"] == [(5.0, 8.0), (22.0, 27.0)]
+        assert result["selectedRanges"] == [(5.0, 8.0), (22.0, 27.0)]
+        assert result["selectedSpeechSeconds"] == pytest.approx(8.0, abs=0.001)
+
+    def test_non_overlapping_range_returns_empty(self):
+        # Arrange
+        segments = [
+            {"speaker_id": "0", "start_time": 0.0, "end_time": 5.0, "text": "hi"},
+        ]
+        # Act
+        result = speaker_id.filter_speaker_segments(segments, "0", ranges=["100-200"])
+        # Assert
+        assert result["selectedRanges"] == []
+        assert result["selectedSegmentCount"] == 0
+        assert result["selectedSpeechSeconds"] == 0.0
+
+    def test_invalid_range_raises(self):
+        # Arrange
+        segments = [{"speaker_id": "0", "start_time": 0.0, "end_time": 5.0, "text": "hi"}]
+        # Act / Assert
+        with pytest.raises(speaker_id.SpeakerIdError):
+            speaker_id.filter_speaker_segments(segments, "0", ranges=["reversed-5"])
+
+    def test_hhmmss_range_string_parses(self):
+        # Arrange: 41m30s - 57m00s
+        segments = [
+            {"speaker_id": "0", "start_time": 2400.0, "end_time": 3600.0, "text": "hi"},
+        ]
+        # Act
+        result = speaker_id.filter_speaker_segments(
+            segments, "0", ranges=["00:41:30-00:57:00"]
+        )
+        # Assert
+        assert result["requestedRanges"] == [(2490.0, 3420.0)]
+        assert result["selectedRanges"] == [(2490.0, 3420.0)]
+        assert result["selectedSpeechSeconds"] == pytest.approx(930.0, abs=0.001)
