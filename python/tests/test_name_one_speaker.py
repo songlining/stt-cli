@@ -1607,10 +1607,30 @@ class TestEnrollRangesDryRunEndToEnd:
         assert not (session / ".speaker-clips").exists()
         assert not (session / helper.AUDIT_FILENAME).exists()
 
-    def test_default_path_generates_sample_without_enrolling(self, tmp_path, capsys):
-        """Without --no-enroll, the command generates a sample but still does
-        NOT enroll a profile (task 03b contract). It needs source audio."""
-        # Arrange
+    def test_default_path_enrolls_profile_after_generating_sample(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        """Without --no-enroll, the command generates a sample AND enrolls a
+        speaker profile from it (task 03c contract). Enrollment is stubbed so
+        no real `stt speaker enroll` subprocess is needed."""
+        # Arrange: isolate profiles dir so there is no name collision.
+        profiles_dir = tmp_path / "profiles"
+        profiles_dir.mkdir()
+        monkeypatch.setenv("STT_SPEAKER_PROFILES_DIR", str(profiles_dir))
+        # Stub the enrollment subprocess so no real stt binary is required.
+        enroll_calls: list[dict[str, Any]] = []
+
+        def _fake_enroll(sample_path, display_name, profiles_root, backend, stt_bin, **kw):
+            enroll_calls.append({"sample_path": str(sample_path), "name": display_name})
+            return {
+                "command": ["stt", "speaker", "enroll", display_name],
+                "returncode": 0,
+                "stdout": "enrolled",
+                "stderr": "",
+                "enrolled": True,
+            }
+
+        monkeypatch.setattr(helper, "enroll_profile_from_sample", _fake_enroll)
         segments = [_seg(4, 0.0, 10.0, "hello world")]
         session = self._make_session(tmp_path, segments)
         _write_wav(session / "system.wav", _tone(11.0))
@@ -1625,12 +1645,14 @@ class TestEnrollRangesDryRunEndToEnd:
                 # no --no-enroll
             ]
         )
-        # Assert: sample generated, but no profile enrollment.
+        # Assert: sample generated AND profile enrolled.
         payload = json.loads(capsys.readouterr().out)
-        assert payload["status"] == "sample_ready"
-        assert payload["enrolled"] is False
-        assert payload["mutated_profiles"] is False
+        assert payload["status"] == "enrolled"
+        assert payload["enrolled"] is True
+        assert payload["mutated_profiles"] is True
         assert (session / ".speaker-clips").is_dir()
+        assert len(enroll_calls) == 1
+        assert enroll_calls[0]["name"] == "Domingo"
 
     def test_source_override_is_respected(self, tmp_path, capsys):
         # Arrange: transcript source is 'system' but --source mic overrides.
@@ -1695,7 +1717,7 @@ class TestEnrollRangesDryRunEndToEnd:
         assert payload["selected_segment_count"] == 2
         assert payload["selected_ranges"] == [[0.0, 5.0], [100.0, 105.0]]
 
-    def test_dry_run_next_step_points_at_sample_generation(self, tmp_path, capsys):
+    def test_dry_run_next_step_points_at_enrollment(self, tmp_path, capsys):
         # Arrange
         segments = [_seg(4, 0.0, 10.0, "hi")]
         session = self._make_session(tmp_path, segments)
@@ -1710,10 +1732,11 @@ class TestEnrollRangesDryRunEndToEnd:
                 "--no-enroll",
             ]
         )
-        # Assert: a recommended next implementation step is present.
+        # Assert: the recommended next step mentions generating a sample and
+        # enrolling a profile from it.
         payload = json.loads(capsys.readouterr().out)
         assert "next_step" in payload and payload["next_step"]
-        assert "03c" in payload["next_step"]
+        assert "enroll" in payload["next_step"].lower()
 
 
 # ===========================================================================
@@ -1781,8 +1804,29 @@ class TestEnrollRangesSampleGenerationEndToEnd:
         _write_transcript(session / "transcript.json", segments)
         return session
 
-    def test_generates_sample_wav_and_metadata_json(self, tmp_path, capsys):
+    def _stub_enrollment(self, monkeypatch, tmp_path) -> None:
+        """Isolate profiles + stub the enrollment subprocess so tests don't need
+        the real `stt speaker enroll` binary/ML backend. Task 03c added real
+        enrollment to the default path; these sample-gen tests only care that
+        a sample is produced, so enrollment is made a no-op success."""
+        profiles_dir = tmp_path / "profiles"
+        profiles_dir.mkdir()
+        monkeypatch.setenv("STT_SPEAKER_PROFILES_DIR", str(profiles_dir))
+
+        def _fake_enroll(sample_path, display_name, profiles_root, backend, stt_bin, **kw):
+            return {
+                "command": ["stt", "speaker", "enroll", display_name],
+                "returncode": 0,
+                "stdout": "enrolled",
+                "stderr": "",
+                "enrolled": True,
+            }
+
+        monkeypatch.setattr(helper, "enroll_profile_from_sample", _fake_enroll)
+
+    def test_generates_sample_wav_and_metadata_json(self, tmp_path, capsys, monkeypatch):
         # Arrange: speaker 4 has speech in 0-5 and 10-15.
+        self._stub_enrollment(monkeypatch, tmp_path)
         segments = [
             _seg(4, 0.0, 5.0, "hello world"),
             _seg(4, 10.0, 15.0, "more speech"),
@@ -1801,9 +1845,9 @@ class TestEnrollRangesSampleGenerationEndToEnd:
         # Assert
         payload = json.loads(capsys.readouterr().out)
         assert payload["action"] == "enroll-ranges"
-        assert payload["status"] == "sample_ready"
-        assert payload["enrolled"] is False
-        assert payload["mutated_profiles"] is False
+        assert payload["status"] == "enrolled"
+        assert payload["enrolled"] is True
+        assert payload["mutated_profiles"] is True
         sample_path = Path(payload["sample_path"])
         meta_path = Path(payload["metadata_path"])
         assert sample_path.exists()
@@ -1813,8 +1857,9 @@ class TestEnrollRangesSampleGenerationEndToEnd:
         assert str(sample_path.resolve()).startswith(str(clips_dir))
         assert str(meta_path.resolve()).startswith(str(clips_dir))
 
-    def test_sample_wav_is_openable_by_python_wave(self, tmp_path, capsys):
+    def test_sample_wav_is_openable_by_python_wave(self, tmp_path, capsys, monkeypatch):
         # Arrange
+        self._stub_enrollment(monkeypatch, tmp_path)
         segments = [_seg(4, 0.0, 10.0, "hello world")]
         session = self._make_session(tmp_path, segments)
         # Act
@@ -1838,8 +1883,9 @@ class TestEnrollRangesSampleGenerationEndToEnd:
             # comptype NONE == plain PCM (not compressed).
             assert handle.getcomptype() == "NONE"
 
-    def test_metadata_contains_required_provenance_fields(self, tmp_path, capsys):
+    def test_metadata_contains_required_provenance_fields(self, tmp_path, capsys, monkeypatch):
         # Arrange: two disjoint ranges.
+        self._stub_enrollment(monkeypatch, tmp_path)
         segments = [
             _seg(4, 0.0, 5.0, "a"),
             _seg(4, 100.0, 105.0, "b"),
@@ -1874,9 +1920,10 @@ class TestEnrollRangesSampleGenerationEndToEnd:
         assert meta["enrolled"] is False
 
     def test_sample_only_contains_requested_ranges_not_whole_cluster(
-        self, tmp_path, capsys
+        self, tmp_path, capsys, monkeypatch
     ):
         # Arrange: speaker has speech at 0-5, 50-55, 100-105. Request only 50-55.
+        self._stub_enrollment(monkeypatch, tmp_path)
         segments = [
             _seg(4, 0.0, 5.0, "early"),
             _seg(4, 50.0, 55.0, "middle"),
@@ -1902,10 +1949,23 @@ class TestEnrollRangesSampleGenerationEndToEnd:
         assert payload["sample_duration_seconds"] >= 4.5
 
     def test_no_profile_is_created_or_modified(self, tmp_path, capsys, monkeypatch):
-        # Arrange: point profiles dir at an empty temp dir.
+        # Arrange: point profiles dir at an empty temp dir and stub enrollment
+        # so no real `stt speaker enroll` subprocess runs.
         profiles_dir = tmp_path / "profiles"
         profiles_dir.mkdir()
         monkeypatch.setenv("STT_SPEAKER_PROFILES_DIR", str(profiles_dir))
+        # Stub enrollment to a no-op success (no real subprocess / profile files).
+        monkeypatch.setattr(
+            helper,
+            "enroll_profile_from_sample",
+            lambda *a, **kw: {
+                "command": ["stt", "speaker", "enroll"],
+                "returncode": 0,
+                "stdout": "",
+                "stderr": "",
+                "enrolled": True,
+            },
+        )
         segments = [_seg(4, 0.0, 10.0, "hi")]
         session = self._make_session(tmp_path, segments)
         names_before = sorted(p.name for p in profiles_dir.iterdir())
@@ -1920,7 +1980,7 @@ class TestEnrollRangesSampleGenerationEndToEnd:
             ]
         )
         capsys.readouterr()  # drain
-        # Assert: profiles dir untouched.
+        # Assert: stubbed enrollment does not create real profile files.
         names_after = sorted(p.name for p in profiles_dir.iterdir())
         assert names_before == names_after
 
@@ -1977,3 +2037,332 @@ class TestEnrollRangesSampleGenerationEndToEnd:
         assert payload["mutated_profiles"] is False
         # No sample written on backend failure.
         assert "sample_path" not in payload
+
+
+# ===========================================================================
+# Task 03c: enroll-ranges profile enrollment + collision handling
+# ===========================================================================
+
+
+class TestEnrollRangesEnrollment:
+    """Task 03c: real profile enrollment from the range-limited sample, with
+    safe display-name collision handling. Enrollment is stubbed so no real
+    `stt speaker enroll` subprocess / ML backend is needed."""
+
+    def _make_session(self, tmp_path: Path, segments) -> Path:
+        session = tmp_path / "session"
+        session.mkdir()
+        last_end = max((s["end_time"] for s in segments), default=30.0)
+        _write_wav(session / "system.wav", _tone(last_end + 1.0))
+        _write_transcript(session / "transcript.json", segments)
+        return session
+
+    def _stub_enroll(self, monkeypatch, *, enrolled=True, returncode=0):
+        calls: list[dict[str, Any]] = []
+
+        def _fake(sample_path, display_name, profiles_root, backend, stt_bin, **kw):
+            calls.append({
+                "sample_path": str(sample_path),
+                "name": display_name,
+                "profiles_root": str(profiles_root),
+            })
+            return {
+                "command": ["stt", "speaker", "enroll", display_name],
+                "returncode": returncode,
+                "stdout": "enrolled" if enrolled else "",
+                "stderr": "" if enrolled else "boom",
+                "enrolled": enrolled,
+            }
+
+        monkeypatch.setattr(helper, "enroll_profile_from_sample", _fake)
+        return calls
+
+    def test_collision_skips_enrollment_without_overwriting(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        # Arrange: a profile named 'Domingo' already exists.
+        profiles_root = tmp_path / "speakers"
+        (profiles_root / "profiles").mkdir(parents=True)
+        (profiles_root / "profiles" / "uuid-1.json").write_text(
+            json.dumps({"id": "uuid-1", "displayName": "Domingo"}),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("STT_SPEAKER_PROFILES_DIR", str(profiles_root))
+        enroll_calls = self._stub_enroll(monkeypatch)
+        segments = [_seg(4, 0.0, 10.0, "hi")]
+        session = self._make_session(tmp_path, segments)
+        # Act
+        helper.main(
+            [
+                "enroll-ranges",
+                "--session", str(session),
+                "--speaker-id", "4",
+                "--range", "1-8",
+                "--name", "Domingo",
+            ]
+        )
+        # Assert: skipped, never enrolled, existing profile untouched.
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "skipped"
+        assert payload["skip_reason"] == "display_name_exists"
+        assert payload["enrolled"] is False
+        assert payload["mutated_profiles"] is False
+        assert payload["sample_path"]  # sample still generated
+        assert enroll_calls == []  # enrollment never invoked
+
+    def test_successful_enrollment_creates_profile_from_sample(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        # Arrange: empty profiles dir (no collision).
+        profiles_root = tmp_path / "speakers"
+        (profiles_root / "profiles").mkdir(parents=True)
+        monkeypatch.setenv("STT_SPEAKER_PROFILES_DIR", str(profiles_root))
+        enroll_calls = self._stub_enroll(monkeypatch, enrolled=True)
+        segments = [_seg(4, 0.0, 10.0, "hi")]
+        session = self._make_session(tmp_path, segments)
+        # Act
+        helper.main(
+            [
+                "enroll-ranges",
+                "--session", str(session),
+                "--speaker-id", "4",
+                "--range", "1-8",
+                "--name", "Domingo",
+            ]
+        )
+        # Assert: enrolled from the range-limited sample only.
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "enrolled"
+        assert payload["enrolled"] is True
+        assert payload["mutated_profiles"] is True
+        assert payload["enroll_returncode"] == 0
+        assert len(enroll_calls) == 1
+        # Enrollment used the generated sample (under .speaker-clips), not the
+        # whole-cluster session audio.
+        assert ".speaker-clips" in enroll_calls[0]["sample_path"]
+        assert enroll_calls[0]["profiles_root"] == str(profiles_root)
+
+    def test_enrollment_failure_does_not_fall_back_to_whole_cluster(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        # Arrange: empty profiles dir, but enrollment fails.
+        profiles_root = tmp_path / "speakers"
+        (profiles_root / "profiles").mkdir(parents=True)
+        monkeypatch.setenv("STT_SPEAKER_PROFILES_DIR", str(profiles_root))
+        enroll_calls = self._stub_enroll(
+            monkeypatch, enrolled=False, returncode=2
+        )
+        segments = [_seg(4, 0.0, 10.0, "hi")]
+        session = self._make_session(tmp_path, segments)
+        # Act: failure path raises SystemExit(1) after emitting structured JSON.
+        with pytest.raises(SystemExit) as exc:
+            helper.main(
+                [
+                    "enroll-ranges",
+                    "--session", str(session),
+                    "--speaker-id", "4",
+                    "--range", "1-8",
+                    "--name", "Domingo",
+                ]
+            )
+        assert exc.value.code == 1
+        # Assert: failure surfaced, exactly one enrollment attempt, no
+        # whole-cluster fallback (would have been a second call).
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "failed"
+        assert payload["enrolled"] is False
+        assert payload["enroll_returncode"] == 2
+        assert len(enroll_calls) == 1
+
+    def test_no_enroll_never_invokes_enrollment_backend(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        # Arrange
+        profiles_root = tmp_path / "speakers"
+        (profiles_root / "profiles").mkdir(parents=True)
+        monkeypatch.setenv("STT_SPEAKER_PROFILES_DIR", str(profiles_root))
+        enroll_calls = self._stub_enroll(monkeypatch)
+        segments = [_seg(4, 0.0, 10.0, "hi")]
+        session = self._make_session(tmp_path, segments)
+        # Act
+        helper.main(
+            [
+                "enroll-ranges",
+                "--session", str(session),
+                "--speaker-id", "4",
+                "--range", "1-8",
+                "--name", "Domingo",
+                "--no-enroll",
+            ]
+        )
+        capsys.readouterr()  # drain
+        # Assert: --no-enroll is pure validation; enrollment never runs.
+        assert enroll_calls == []
+
+
+# ===========================================================================
+# Task 06c: helper suggest-labels command
+# ===========================================================================
+
+
+class TestSuggestLabelsCommand:
+    """Task 06c: the `suggest-labels` helper command writes a session artifact
+    without mutating transcripts or profiles. The backend ML subprocess is
+    stubbed so tests stay fast and ML-free."""
+
+    def _make_session(self, tmp_path: Path, segments) -> Path:
+        session = tmp_path / "session"
+        session.mkdir()
+        last_end = max((s["end_time"] for s in segments), default=10.0)
+        _write_wav(session / "system.wav", _tone(last_end + 1.0))
+        _write_transcript(session / "transcript.json", segments)
+        return session
+
+    def _stub_backend(self, monkeypatch, *, payload):
+        """Stub the backend subprocess so it writes the given payload to the
+        --json output path and returns success."""
+        runs: list[list[str]] = []
+
+        class _FakeProc:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def _fake_run(cmd, *a, **kw):
+            runs.append(cmd)
+            # Find the --json path in the cmd list and write the payload there.
+            json_idx = cmd.index("--json") + 1 if "--json" in cmd else None
+            if json_idx is not None:
+                Path(cmd[json_idx]).write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            return _FakeProc()
+
+        monkeypatch.setattr(helper.subprocess, "run", _fake_run)
+        return runs
+
+    def test_parser_accepts_suggest_labels_options(self):
+        # Act
+        parser = helper.build_parser()
+        args = parser.parse_args(
+            [
+                "suggest-labels",
+                "--session", "/tmp/sess",
+                "--threshold", "0.8",
+                "--margin", "0.1",
+                "--no-windows",
+            ]
+        )
+        # Assert
+        assert args.command == "suggest-labels"
+        assert args.threshold == 0.8
+        assert args.margin == 0.1
+        assert args.no_windows is True
+        assert args.func is helper.do_suggest_labels
+
+    def test_writes_artifact_json_with_duplicate_and_mixed_fields(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        # Arrange: isolate profiles (empty -> backend gets no --profiles).
+        profiles_root = tmp_path / "speakers"
+        (profiles_root / "profiles").mkdir(parents=True)
+        monkeypatch.setenv("STT_SPEAKER_PROFILES_DIR", str(profiles_root))
+        backend_payload = {
+            "schemaVersion": 1,
+            "duplicateGroups": [
+                {"profileId": "p1", "speakers": ["1", "2"]},
+            ],
+            "mixedClusters": [],
+            "clusters": [],
+        }
+        self._stub_backend(monkeypatch, payload=backend_payload)
+        segments = [_seg(4, 0.0, 10.0, "hi")]
+        session = self._make_session(tmp_path, segments)
+        # Act
+        helper.main(
+            ["suggest-labels", "--session", str(session), "--no-windows"]
+        )
+        # Assert
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["action"] == "suggest-labels"
+        assert payload["cached"] is False
+        artifact = session / helper.LABEL_SUGGESTIONS_FILENAME
+        assert artifact.exists()
+        written = json.loads(artifact.read_text(encoding="utf-8"))
+        assert written["duplicateGroups"][0]["profileId"] == "p1"
+
+    def test_force_recomputes_and_ignores_cached_artifact(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        # Arrange: a cached artifact already exists with stale data.
+        profiles_root = tmp_path / "speakers"
+        (profiles_root / "profiles").mkdir(parents=True)
+        monkeypatch.setenv("STT_SPEAKER_PROFILES_DIR", str(profiles_root))
+        segments = [_seg(4, 0.0, 10.0, "hi")]
+        session = self._make_session(tmp_path, segments)
+        artifact = session / helper.LABEL_SUGGESTIONS_FILENAME
+        artifact.write_text(
+            json.dumps({"schemaVersion": 1, "duplicateGroups": "STALE"}),
+            encoding="utf-8",
+        )
+        fresh_payload = {
+            "schemaVersion": 1,
+            "duplicateGroups": [{"profileId": "fresh"}],
+            "mixedClusters": [],
+        }
+        runs = self._stub_backend(monkeypatch, payload=fresh_payload)
+        # Act
+        helper.main(
+            ["suggest-labels", "--session", str(session), "--force", "--no-windows"]
+        )
+        # Assert: backend was actually invoked (cache ignored).
+        assert len(runs) == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["cached"] is False
+        assert payload["duplicateGroups"][0]["profileId"] == "fresh"
+
+    def test_reuses_cached_artifact_without_force(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        # Arrange: cached artifact exists; --force is NOT passed.
+        segments = [_seg(4, 0.0, 10.0, "hi")]
+        session = self._make_session(tmp_path, segments)
+        artifact = session / helper.LABEL_SUGGESTIONS_FILENAME
+        cached = {
+            "schemaVersion": 1,
+            "duplicateGroups": [{"profileId": "cached"}],
+        }
+        artifact.write_text(json.dumps(cached), encoding="utf-8")
+        # Stub backend - it should NOT be called.
+        runs = self._stub_backend(monkeypatch, payload={"should": "not be used"})
+        # Act
+        helper.main(["suggest-labels", "--session", str(session)])
+        # Assert
+        assert runs == []  # backend not invoked
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["cached"] is True
+        assert payload["duplicateGroups"][0]["profileId"] == "cached"
+
+    def test_does_not_mutate_transcript_or_profiles(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        # Arrange
+        profiles_root = tmp_path / "speakers"
+        (profiles_root / "profiles").mkdir(parents=True)
+        monkeypatch.setenv("STT_SPEAKER_PROFILES_DIR", str(profiles_root))
+        self._stub_backend(
+            monkeypatch,
+            payload={"schemaVersion": 1, "duplicateGroups": [], "mixedClusters": []},
+        )
+        segments = [_seg(4, 0.0, 10.0, "hi")]
+        session = self._make_session(tmp_path, segments)
+        transcript = session / "transcript.json"
+        before = transcript.read_bytes()
+        # Act
+        helper.main(
+            ["suggest-labels", "--session", str(session), "--force", "--no-windows"]
+        )
+        capsys.readouterr()  # drain
+        # Assert: transcript bytes unchanged.
+        assert transcript.read_bytes() == before

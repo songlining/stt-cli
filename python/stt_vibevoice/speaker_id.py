@@ -1712,6 +1712,84 @@ def _cmd_concatenate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_audio_arg(value: str) -> Tuple[str, Path]:
+    """Parse one ``--audio source=path`` argument into ``(source, path)``.
+
+    The helper passes audio as ``mic=/path/to/mic.wav`` (or
+    ``default=/path`` for single-track fallback). A bare path with no ``=``
+    is accepted as ``default=<path>`` for convenience.
+    """
+    text = str(value).strip()
+    if "=" in text:
+        source, _, path_str = text.partition("=")
+        source = source.strip()
+        path_str = path_str.strip()
+    else:
+        source, path_str = "default", text
+    if not source or not path_str:
+        raise SpeakerIdError(
+            f"Invalid --audio {value!r}: expected 'source=path' (e.g. 'mic=/path/to/mic.wav')."
+    )
+    return source, Path(path_str)
+
+
+def _cmd_suggest_labels(args: argparse.Namespace) -> int:
+    """CLI bridge for the label-suggestion adapter (task 06c).
+
+    Loads the transcript + audio + profiles from CLI paths, calls
+    :func:`suggest_labels` (the 06b adapter), and writes the result via
+    :func:`_write_json`. Never mutates the transcript or profiles; the only
+    file written is the ``--json`` output path (and stdout).
+    """
+    if not args.transcript:
+        raise SpeakerIdError("--transcript is required")
+    transcript_path = Path(args.transcript)
+    if not transcript_path.exists():
+        raise SpeakerIdError(f"Transcript not found: {transcript_path}")
+    payload = json.loads(transcript_path.read_text(encoding="utf-8"))
+    segments = payload.get("segments") or []
+    if not isinstance(segments, list):
+        raise SpeakerIdError(f"Transcript {transcript_path} has no 'segments' list.")
+
+    # Parse repeatable --audio source=path arguments into a {source: path} map.
+    audio_args = getattr(args, "audio", None) or []
+    if not audio_args:
+        raise SpeakerIdError(
+            "At least one --audio source=path is required (e.g. --audio mic=/path/to/mic.wav)."
+        )
+    audio_paths: Dict[str, Path] = {}
+    for value in audio_args:
+        source, wav_path = _parse_audio_arg(value)
+        audio_paths[source] = wav_path
+
+    # Load enrolled profiles from the flattened JSON the helper prepares
+    # (``{"profiles": [...]}``). When omitted, pass an empty list so the
+    # adapter emits the explicit ``no_profiles`` state.
+    profiles: List[Dict[str, Any]] = []
+    if args.profiles:
+        profiles_payload = json.loads(Path(args.profiles).read_text(encoding="utf-8"))
+        loaded = profiles_payload.get("profiles") or []
+        if isinstance(loaded, list):
+            profiles = list(loaded)
+
+    # --no-windows disables window matching; otherwise use --n-windows.
+    n_windows = 0 if getattr(args, "no_windows", False) else int(args.n_windows)
+
+    result = suggest_labels(
+        segments=segments,
+        audio_paths=audio_paths,
+        profiles=profiles,
+        provider=args.provider,
+        threshold=float(args.threshold),
+        margin=float(args.margin),
+        minimum_speech_seconds=float(args.minimum_speech_seconds),
+        n_windows=n_windows,
+        session=args.session,
+    )
+    _write_json(result, args.json)
+    return 0
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python3 -m stt_vibevoice.speaker_id",
@@ -1777,6 +1855,80 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     concat_parser.add_argument("--json", help="Path to write JSON result (also printed to stdout).")
     concat_parser.set_defaults(func=_cmd_concatenate)
+
+    suggest_parser = subparsers.add_parser(
+        "suggest-labels",
+        help=(
+            "Match every diarised cluster against enrolled profiles and emit "
+            "label suggestions (duplicate/mixed detection). Read-only."
+        ),
+    )
+    suggest_parser.add_argument(
+        "--transcript",
+        required=True,
+        help="Path to transcript JSON with diarised segments.",
+    )
+    suggest_parser.add_argument(
+        "--audio",
+        action="append",
+        default=None,
+        dest="audio",
+        help=(
+            "Source audio as 'source=path' (repeatable; e.g. "
+            "--audio mic=/path/to/mic.wav --audio system=/path/to/system.wav)."
+        ),
+    )
+    suggest_parser.add_argument(
+        "--profiles",
+        default=None,
+        help="Path to flattened profiles JSON ({'profiles': [...]}). Omit for the no-profiles state.",
+    )
+    suggest_parser.add_argument(
+        "--provider",
+        default="mfcc-test",
+        help="Embedding provider to use (default mfcc-test; speechbrain for real recognition).",
+    )
+    suggest_parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.78,
+        help="Minimum confidence to consider a profile match (default 0.78).",
+    )
+    suggest_parser.add_argument(
+        "--margin",
+        type=float,
+        default=0.05,
+        help="Minimum margin over runner-up profile to consider a match (default 0.05).",
+    )
+    suggest_parser.add_argument(
+        "--minimum-speech-seconds",
+        type=float,
+        default=8.0,
+        help="Minimum total speech seconds to extract an embedding per cluster (default 8).",
+    )
+    suggest_parser.add_argument(
+        "--session",
+        default=None,
+        help="Optional session directory path (echoed into provenance).",
+    )
+    suggest_parser.add_argument(
+        "--no-windows",
+        dest="no_windows",
+        action="store_true",
+        help="Skip per-window mixed-cluster detection.",
+    )
+    suggest_parser.add_argument(
+        "--n-windows",
+        type=int,
+        default=2,
+        help="Number of chronological windows for mixed-cluster detection (default 2; 0 when --no-windows).",
+    )
+    suggest_parser.add_argument(
+        "--json",
+        default=None,
+        help="Path to write JSON result (also printed to stdout).",
+    )
+    suggest_parser.set_defaults(func=_cmd_suggest_labels)
 
     return parser
 
