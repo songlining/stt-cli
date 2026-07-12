@@ -1837,3 +1837,538 @@ class TestLabelSuggestions:
         assert result["session"] == "sess-123"
         assert result["generatedAt"] == "2026-01-01T00:00:00+00:00"
         assert result["profilesConsidered"] == {"count": 1, "profileIds": ["a"]}
+
+
+class TestSuggestLabelsAdapter:
+    """Unit tests for the ``suggest_labels`` matching adapter (task 06b).
+
+    These exercise the orchestration (extraction -> matching -> grouping) with
+    *mocked* extraction and matching hooks so no audio, ML backend, profiles
+    directory, or transcript mutation is required. The adapter must:
+      - map mocked extraction/match outputs into the grouping input shape,
+      - handle no-profiles and no-usable-speech states cleanly (non-fatal),
+      - pass threshold/margin through to match and into the output config,
+      - never write files or mutate inputs,
+      - produce duplicate and mixed-cluster evidence from adapter inputs.
+    """
+
+    # -- factory helpers -------------------------------------------------
+
+    def _profile(self, profile_id, display_name=None, embedding=None):
+        return {
+            "id": profile_id,
+            "displayName": display_name or f"Person {profile_id}",
+            "embeddingProvider": "mfcc-test",
+            "embeddingModel": "stt-vibevoice/mfcc-test-v1",
+            "embedding": embedding or [1.0, 0.0],
+        }
+
+    def _segment(self, speaker_id, start, end, *, source="mic", text="hello"):
+        return {
+            "speaker_id": str(speaker_id),
+            "source": source,
+            "start_time": start,
+            "end_time": end,
+            "text": text,
+        }
+
+    def _ok_extraction(self, speaker_id, embedding, *, duration=10.0, segment_count=2,
+                       ranges=None, model="stt-vibevoice/mfcc-test-v1"):
+        return {
+            "speakerId": str(speaker_id),
+            "provider": "mfcc-test",
+            "model": model,
+            "embedding": embedding,
+            "durationSeconds": duration,
+            "segmentCount": segment_count,
+            "status": "ok",
+            "selectedRanges": ranges or [[0.0, 5.0], [5.0, 10.0]],
+            "selectedSpeechSeconds": duration,
+        }
+
+    def _too_short_extraction(self, speaker_id):
+        return {
+            "speakerId": str(speaker_id),
+            "provider": "mfcc-test",
+            "model": None,
+            "embedding": None,
+            "durationSeconds": 0.5,
+            "segmentCount": 0,
+            "status": "too_short",
+            "selectedRanges": [],
+            "selectedSpeechSeconds": 0.5,
+        }
+
+    # -- core mapping ----------------------------------------------------
+
+    def test_maps_mocked_extraction_and_match_into_grouping_shape(self, tmp_path):
+        """The adapter extracts one embedding per cluster, matches it, and feeds
+        the result into build_label_suggestions in the correct shape."""
+        profiles = [self._profile("a", "Alice")]
+        segments = [
+            self._segment("0", 0.0, 5.0),
+            self._segment("0", 6.0, 11.0),
+            self._segment("1", 0.0, 8.0, source="system"),
+        ]
+        extract_calls = []
+        match_calls = []
+
+        def fake_extract(segs, *, audio_paths, source, provider, minimum_speech_seconds):
+            sid = str(segs[0]["speaker_id"])
+            extract_calls.append((sid, source))
+            return self._ok_extraction(sid, [1.0, 0.0])
+
+        def fake_match(candidate, profs, threshold, margin):
+            # Always match the first profile confidently.
+            p = profs[0]
+            match_calls.append((candidate["speakerId"], threshold, margin))
+            return {
+                "bestMatch": {
+                    "profileId": p["id"],
+                    "displayName": p["displayName"],
+                    "confidence": 0.95,
+                    "margin": 0.5,
+                    "matched": True,
+                    "status": "matched",
+                },
+                "candidates": [],
+                "skippedProfiles": [],
+                "warnings": [],
+            }
+
+        result = speaker_id.suggest_labels(
+            segments=segments,
+            audio_paths={"mic": tmp_path / "mic.wav", "system": tmp_path / "system.wav"},
+            profiles=profiles,
+            provider="mfcc-test",
+            threshold=0.78,
+            margin=0.05,
+            extract_cluster_fn=fake_extract,
+            match_fn=fake_match,
+        )
+        assert result["schemaVersion"] == speaker_id.LABEL_SUGGESTIONS_SCHEMA_VERSION
+        assert result["status"] == "ok"
+        # Both clusters extracted + matched.
+        assert sorted(sid for sid, _ in extract_calls) == ["0", "1"]
+        assert sorted(sid for sid, _, _ in match_calls) == ["0", "1"]
+        # Source resolved per cluster from the transcript.
+        sources = dict(extract_calls)
+        assert sources["0"] == "mic"
+        assert sources["1"] == "system"
+        # Both clusters matched profile 'a' -> one duplicate group.
+        assert result["summary"]["matchedCount"] == 2
+        assert result["summary"]["duplicateGroupCount"] == 1
+
+    def test_threshold_and_margin_passed_to_match_and_output_config(self, tmp_path):
+        profiles = [self._profile("a", "Alice")]
+        seen_thresholds = []
+        seen_margins = []
+
+        def fake_extract(segs, **kw):
+            return self._ok_extraction(segs[0]["speaker_id"], [1.0, 0.0])
+
+        def fake_match(candidate, profs, threshold, margin):
+            seen_thresholds.append(threshold)
+            seen_margins.append(margin)
+            return {"bestMatch": None, "candidates": [], "skippedProfiles": [], "warnings": []}
+
+        result = speaker_id.suggest_labels(
+            segments=[self._segment("0", 0.0, 8.0)],
+            audio_paths={"mic": tmp_path / "mic.wav"},
+            profiles=profiles,
+            provider="mfcc-test",
+            threshold=0.82,
+            margin=0.07,
+            extract_cluster_fn=fake_extract,
+            match_fn=fake_match,
+        )
+        assert seen_thresholds == [0.82]
+        assert seen_margins == [0.07]
+        assert result["config"]["threshold"] == 0.82
+        assert result["config"]["margin"] == 0.07
+
+    # -- clean edge states ----------------------------------------------
+
+    def test_no_profiles_returns_no_profiles_status(self, tmp_path):
+        def fake_extract(segs, **kw):
+            return self._ok_extraction(segs[0]["speaker_id"], [1.0, 0.0])
+
+        result = speaker_id.suggest_labels(
+            segments=[self._segment("0", 0.0, 8.0)],
+            audio_paths={"mic": tmp_path / "mic.wav"},
+            profiles=[],
+            provider="mfcc-test",
+            threshold=0.78,
+            margin=0.05,
+            extract_cluster_fn=fake_extract,
+        )
+        assert result["status"] == "no_profiles"
+        assert result["profilesConsidered"] == {"count": 0, "profileIds": []}
+        assert result["clusters"] == []
+        assert result["summary"]["unmatchedCount"] == 1
+
+    def test_no_usable_speech_is_non_fatal(self, tmp_path):
+        profiles = [self._profile("a", "Alice")]
+
+        def fake_extract(segs, **kw):
+            return self._too_short_extraction(segs[0]["speaker_id"])
+
+        result = speaker_id.suggest_labels(
+            segments=[self._segment("0", 0.0, 0.3)],
+            audio_paths={"mic": tmp_path / "mic.wav"},
+            profiles=profiles,
+            provider="mfcc-test",
+            threshold=0.78,
+            margin=0.05,
+            extract_cluster_fn=fake_extract,
+        )
+        # Status is still 'ok' (grouping ran); the cluster just didn't match.
+        assert result["status"] == "ok"
+        assert len(result["clusters"]) == 1
+        assert result["clusters"][0]["recommendation"] == "no_confident_match"
+        assert result["summary"]["matchedCount"] == 0
+        assert result["summary"]["unmatchedCount"] == 1
+        # No duplicate groups or mixed warnings from a too-short cluster.
+        assert result["duplicateClusterGroups"] == []
+        assert result["mixedClusterWarnings"] == []
+
+    def test_missing_audio_path_is_non_fatal_with_default_hook(self, tmp_path):
+        """A cluster whose resolved audio WAV does not exist on disk must NOT
+        crash the adapter (real default extraction hook, no mocks). It degrades
+        to a non-fatal no-confident_match suggestion rather than raising."""
+        profiles = [self._profile("a", "Alice")]
+        result = speaker_id.suggest_labels(
+            segments=[self._segment("0", 0.0, 8.0)],
+            audio_paths={"mic": tmp_path / "does_not_exist.wav"},
+            profiles=profiles,
+            provider="mfcc-test",
+            threshold=0.78,
+            margin=0.05,
+        )
+        assert result["status"] == "ok"
+        assert len(result["clusters"]) == 1
+        assert result["clusters"][0]["recommendation"] == "no_confident_match"
+        assert result["summary"]["matchedCount"] == 0
+        assert result["summary"]["unmatchedCount"] == 1
+
+    def test_mixed_speech_and_no_speech_clusters(self, tmp_path):
+        """A cluster with speech + a cluster without speech both flow through."""
+        profiles = [self._profile("a", "Alice")]
+
+        def fake_extract(segs, **kw):
+            sid = str(segs[0]["speaker_id"])
+            if sid == "0":
+                return self._ok_extraction(sid, [1.0, 0.0])
+            return self._too_short_extraction(sid)
+
+        def fake_match(candidate, profs, threshold, margin):
+            p = profs[0]
+            return {
+                "bestMatch": {
+                    "profileId": p["id"], "displayName": p["displayName"],
+                    "confidence": 0.95, "margin": 0.5, "matched": True,
+                    "status": "matched",
+                },
+                "candidates": [], "skippedProfiles": [], "warnings": [],
+            }
+
+        result = speaker_id.suggest_labels(
+            segments=[
+                self._segment("0", 0.0, 8.0),
+                self._segment("1", 0.0, 0.3),
+            ],
+            audio_paths={"mic": tmp_path / "mic.wav"},
+            profiles=profiles,
+            provider="mfcc-test",
+            threshold=0.78,
+            margin=0.05,
+            extract_cluster_fn=fake_extract,
+            match_fn=fake_match,
+        )
+        assert result["summary"]["clusterCount"] == 2
+        assert result["summary"]["matchedCount"] == 1
+        assert result["summary"]["unmatchedCount"] == 1
+
+    # -- non-mutation ----------------------------------------------------
+
+    def test_adapter_does_not_mutate_segments_or_profiles(self, tmp_path):
+        import copy
+
+        profiles = [self._profile("a", "Alice")]
+        segments = [self._segment("0", 0.0, 8.0)]
+        profiles_snapshot = copy.deepcopy(profiles)
+        segments_snapshot = copy.deepcopy(segments)
+
+        def fake_extract(segs, **kw):
+            return self._ok_extraction(segs[0]["speaker_id"], [1.0, 0.0])
+
+        def fake_match(candidate, profs, threshold, margin):
+            return {"bestMatch": None, "candidates": [], "skippedProfiles": [], "warnings": []}
+
+        speaker_id.suggest_labels(
+            segments=segments,
+            audio_paths={"mic": tmp_path / "mic.wav"},
+            profiles=profiles,
+            provider="mfcc-test",
+            threshold=0.78,
+            margin=0.05,
+            extract_cluster_fn=fake_extract,
+            match_fn=fake_match,
+        )
+        assert profiles == profiles_snapshot
+        assert segments == segments_snapshot
+
+    def test_adapter_writes_no_files(self, tmp_path):
+        before = set(p.name for p in tmp_path.iterdir())
+
+        def fake_extract(segs, **kw):
+            return self._ok_extraction(segs[0]["speaker_id"], [1.0, 0.0])
+
+        speaker_id.suggest_labels(
+            segments=[self._segment("0", 0.0, 8.0)],
+            audio_paths={"mic": tmp_path / "mic.wav"},
+            profiles=[self._profile("a", "Alice")],
+            provider="mfcc-test",
+            threshold=0.78,
+            margin=0.05,
+            extract_cluster_fn=fake_extract,
+        )
+        after = set(p.name for p in tmp_path.iterdir())
+        assert before == after, f"adapter wrote files: {after - before}"
+
+    # -- duplicate + mixed evidence --------------------------------------
+
+    def test_two_clusters_same_profile_produce_duplicate_group(self, tmp_path):
+        profiles = [self._profile("a", "Alice")]
+
+        def fake_extract(segs, **kw):
+            return self._ok_extraction(segs[0]["speaker_id"], [1.0, 0.0])
+
+        def fake_match(candidate, profs, threshold, margin):
+            p = profs[0]
+            return {
+                "bestMatch": {
+                    "profileId": p["id"], "displayName": p["displayName"],
+                    "confidence": 0.93, "margin": 0.4, "matched": True,
+                    "status": "matched",
+                },
+                "candidates": [], "skippedProfiles": [], "warnings": [],
+            }
+
+        result = speaker_id.suggest_labels(
+            segments=[self._segment("0", 0.0, 8.0), self._segment("1", 0.0, 8.0)],
+            audio_paths={"mic": tmp_path / "mic.wav"},
+            profiles=profiles,
+            provider="mfcc-test",
+            threshold=0.78,
+            margin=0.05,
+            extract_cluster_fn=fake_extract,
+            match_fn=fake_match,
+        )
+        groups = result["duplicateClusterGroups"]
+        assert len(groups) == 1
+        assert groups[0]["profileId"] == "a"
+        assert [m["speakerId"] for m in groups[0]["clusters"]] == ["0", "1"]
+
+    def test_windows_matching_different_profiles_produce_mixed_warning(self, tmp_path):
+        profiles = [self._profile("a", "Alice"), self._profile("b", "Bob", embedding=[0.0, 1.0])]
+
+        def fake_extract_cluster(segs, **kw):
+            return self._ok_extraction(
+                segs[0]["speaker_id"], [1.0, 0.0],
+                ranges=[[0.0, 9.0]], duration=9.0, segment_count=1,
+            )
+
+        def fake_extract_window(segs, *, window_range, **kw):
+            return self._ok_extraction(
+                segs[0]["speaker_id"], [1.0, 0.0],
+                ranges=[list(window_range)], duration=3.0,
+            )
+
+        # The adapter calls match once per whole cluster then once per window.
+        # For one cluster with 3 windows: call 1 = whole (no match),
+        # calls 2..4 = windows (alternating profiles to force a conflict).
+        call_index = {"n": 0}
+        window_profiles = [("a", "Alice", 0.95), ("b", "Bob", 0.93), ("a", "Alice", 0.94)]
+
+        def fake_match_stateful(candidate, profs, threshold, margin):
+            call_index["n"] += 1
+            n = call_index["n"]
+            if n == 1:
+                # whole-cluster match: no confident match
+                return {"bestMatch": None, "candidates": [], "skippedProfiles": [], "warnings": []}
+            pid, name, conf = window_profiles[n - 2]
+            return {
+                "bestMatch": {
+                    "profileId": pid, "displayName": name, "confidence": conf,
+                    "margin": 0.5, "matched": True, "status": "matched",
+                },
+                "candidates": [], "skippedProfiles": [], "warnings": [],
+            }
+
+        result = speaker_id.suggest_labels(
+            segments=[self._segment("0", 0.0, 9.0)],
+            audio_paths={"mic": tmp_path / "mic.wav"},
+            profiles=profiles,
+            provider="mfcc-test",
+            threshold=0.78,
+            margin=0.05,
+            n_windows=3,
+            extract_cluster_fn=fake_extract_cluster,
+            extract_window_fn=fake_extract_window,
+            match_fn=fake_match_stateful,
+        )
+        warnings = result["mixedClusterWarnings"]
+        assert len(warnings) == 1
+        w = warnings[0]
+        assert w["speakerId"] == "0"
+        assert set(w["conflictingProfileIds"]) == {"a", "b"}
+        assert w["recommendation"] == "do_not_enroll_whole_cluster"
+        assert len(w["windows"]) == 3
+
+    # -- provenance + ordering -------------------------------------------
+
+    def test_model_captured_from_extraction_and_echoed_in_config(self, tmp_path):
+        def fake_extract(segs, **kw):
+            return self._ok_extraction(segs[0]["speaker_id"], [1.0, 0.0],
+                                      model="custom-model-v2")
+
+        result = speaker_id.suggest_labels(
+            segments=[self._segment("0", 0.0, 8.0)],
+            audio_paths={"mic": tmp_path / "mic.wav"},
+            profiles=[self._profile("a", "Alice")],
+            provider="mfcc-test",
+            threshold=0.78,
+            margin=0.05,
+            session="sess-42",
+            generated_at="2026-07-11T00:00:00+00:00",
+            extract_cluster_fn=fake_extract,
+        )
+        assert result["config"]["model"] == "custom-model-v2"
+        assert result["config"]["provider"] == "mfcc-test"
+        assert result["session"] == "sess-42"
+        assert result["generatedAt"] == "2026-07-11T00:00:00+00:00"
+
+    def test_clusters_processed_in_numeric_order(self, tmp_path):
+        """Speaker ids 0..10 should be processed in numeric order, not lexical.
+
+        (The pure ``build_label_suggestions`` re-sorts the output lexically by
+        speakerId; this test verifies the adapter's own extraction order is
+        numeric-aware so model/provenance capture is deterministic.)"""
+        order = []
+
+        def fake_extract(segs, **kw):
+            sid = str(segs[0]["speaker_id"])
+            order.append(sid)
+            return self._ok_extraction(sid, [1.0, 0.0])
+
+        segments = [self._segment(str(i), 0.0, 8.0) for i in [10, 2, 1, 0]]
+        speaker_id.suggest_labels(
+            segments=segments,
+            audio_paths={"mic": tmp_path / "mic.wav"},
+            profiles=[self._profile("a", "Alice")],
+            provider="mfcc-test",
+            threshold=0.78,
+            margin=0.05,
+            extract_cluster_fn=fake_extract,
+        )
+        assert order == ["0", "1", "2", "10"]
+
+    # -- load_profiles helper --------------------------------------------
+
+    def test_load_profiles_empty_when_dir_missing(self, tmp_path):
+        assert speaker_id.load_profiles(tmp_path / "nope") == []
+
+    def test_load_profiles_empty_when_dir_empty(self, tmp_path):
+        assert speaker_id.load_profiles(tmp_path) == []
+
+    def test_load_profiles_reads_profile_jsons(self, tmp_path):
+        (tmp_path / "alice.json").write_text(json.dumps({
+            "id": "alice", "displayName": "Alice",
+            "embeddingProvider": "mfcc-test",
+            "embeddingModel": "stt-vibevoice/mfcc-test-v1",
+            "embedding": [1.0, 0.0],
+        }), encoding="utf-8")
+        (tmp_path / "bob.json").write_text(json.dumps({
+            "id": "bob", "displayName": "Bob",
+            "embeddingProvider": "mfcc-test",
+            "embeddingModel": "stt-vibevoice/mfcc-test-v1",
+            "embedding": [0.0, 1.0],
+        }), encoding="utf-8")
+        # index.json should be skipped.
+        (tmp_path / "index.json").write_text(json.dumps({"order": []}), encoding="utf-8")
+        # Malformed JSON should be skipped (best-effort).
+        (tmp_path / "broken.json").write_text("{not json", encoding="utf-8")
+
+        loaded = speaker_id.load_profiles(tmp_path)
+        ids = sorted(p["id"] for p in loaded)
+        assert ids == ["alice", "bob"]
+
+    def test_load_profiles_none_returns_empty(self):
+        assert speaker_id.load_profiles(None) == []
+
+    # -- window splitter (pure helper) -----------------------------------
+
+    def test_split_ranges_into_windows_by_speech_duration(self):
+        # 20s of speech across two ranges with a gap: split into 3 windows.
+        windows = speaker_id._split_ranges_into_windows([(0.0, 10.0), (20.0, 30.0)], 3)
+        assert len(windows) == 3
+        labels = [label for label, _ in windows]
+        assert labels == ["window-1", "window-2", "window-3"]
+        # Each window bounding range is a valid (start < end) pair.
+        for _, (s, e) in windows:
+            assert e > s
+
+    def test_split_ranges_zero_windows_returns_empty(self):
+        assert speaker_id._split_ranges_into_windows([(0.0, 10.0)], 0) == []
+
+    def test_split_ranges_empty_ranges_returns_empty(self):
+        assert speaker_id._split_ranges_into_windows([], 3) == []
+
+    def test_split_ranges_contiguous_ranges(self):
+        windows = speaker_id._split_ranges_into_windows([(0.0, 3.0), (3.0, 6.0), (6.0, 9.0)], 3)
+        assert len(windows) == 3
+        # Contiguous ranges -> windows tile perfectly with no gaps.
+        assert windows[0][1][0] == 0.0
+        assert windows[-1][1][1] == 9.0
+
+    # -- source resolution -----------------------------------------------
+
+    def test_resolve_source_wav_explicit_source(self):
+        paths = {"mic": Path("/a/m.wav"), "system": Path("/a/s.wav")}
+        assert speaker_id._resolve_source_wav(paths, "mic") == Path("/a/m.wav")
+        assert speaker_id._resolve_source_wav(paths, "system") == Path("/a/s.wav")
+
+    def test_resolve_source_wav_falls_back_to_single_path(self):
+        paths = {"default": Path("/a/x.wav")}
+        assert speaker_id._resolve_source_wav(paths, None) == Path("/a/x.wav")
+
+    def test_resolve_source_wav_none_when_empty(self):
+        assert speaker_id._resolve_source_wav({}, "mic") is None
+
+    def test_resolve_source_wav_case_insensitive(self):
+        paths = {"Mic": Path("/a/m.wav")}
+        assert speaker_id._resolve_source_wav(paths, "mic") == Path("/a/m.wav")
+
+    # -- default extraction uses real backend (fast mfcc-test) -----------
+
+    def test_default_extract_cluster_uses_real_backend(self, tmp_path):
+        """Integration-flavored unit test: the default extraction hook actually
+        slices audio via the existing backend. Uses the fast mfcc-test provider
+        on a tiny generated WAV so no heavy ML is loaded."""
+        wav = tmp_path / "mic.wav"
+        _write_wav(wav, _tone(10.0))
+        segments = [
+            {"speaker_id": "0", "source": "mic", "start_time": 0.0, "end_time": 5.0, "text": "hi"},
+            {"speaker_id": "0", "source": "mic", "start_time": 5.0, "end_time": 10.0, "text": "yo"},
+        ]
+        result = speaker_id._default_extract_cluster(
+            segments,
+            audio_paths={"mic": wav},
+            source="mic",
+            provider="mfcc-test",
+            minimum_speech_seconds=8.0,
+        )
+        assert result["status"] == "ok"
+        assert result["embedding"] is not None
+        assert result["model"] == speaker_id._mfcc_test_model_id()

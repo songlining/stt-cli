@@ -27,7 +27,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .chunking import probe_wav
 from .wav_slicing import concatenate_wav_segments, read_pcm16_mono_samples
@@ -1176,6 +1176,392 @@ def _detect_mixed_windows(
         "conflictingProfileIds": sorted(distinct),
         "conflictingDisplayNames": sorted(set(confident_names)),
     }
+
+
+# ---------------------------------------------------------------------------
+# Label suggestion matching adapter
+# ---------------------------------------------------------------------------
+#
+# ``suggest_labels`` is the bridge between the pure grouping logic
+# (:func:`build_label_suggestions` from task 06a) and the real extraction +
+# matching backend. It owns *only* the orchestration: grouping transcript
+# segments into clusters, extracting one embedding per cluster (delegated to
+# the existing extraction support), matching each embedding against enrolled
+# profiles (delegated to :func:`match_candidate`), optionally splitting each
+# cluster into chronological windows for mixed-cluster detection, and finally
+# handing the computed per-cluster / per-window match results to the pure
+# grouping function.
+#
+# Design rules (see task 06b):
+#   - Returns the suggestion JSON. NEVER writes files, mutates the transcript,
+#     or touches enrolled profiles. (Filesystem persistence belongs to task
+#     06c's CLI command wiring.)
+#   - No-profile and no-usable-speech states are explicit and non-fatal.
+#   - Slow ML/audio work is kept behind dependency-injection hooks
+#     (``extract_cluster_fn`` / ``match_fn`` / ``extract_window_fn``) so the
+#     fast unit test suite can exercise the orchestration with mocks and zero
+#     audio/ML/profiles on disk. The default hooks call the real backend.
+
+
+def load_profiles(profiles_dir: Optional[Path]) -> List[Dict[str, Any]]:
+    """Load enrolled speaker profile JSONs from ``profiles_dir`` into a list.
+
+    Each ``*.json`` file (except ``index.json``) is read and, if it looks like a
+    profile (has an ``id`` or ``embedding`` key), appended to the result. Returns
+    an empty list when ``profiles_dir`` is ``None``, missing, or empty so callers
+    can branch on the no-profile state without catching exceptions.
+
+    This mirrors the helper-side ``load_flattened_profiles_file`` flattening but
+    lives in the backend module so the adapter can be called self-contained with
+    just a profiles directory. Malformed files are skipped (best-effort) rather
+    than fatal.
+    """
+    if profiles_dir is None:
+        return []
+    profiles_path = Path(profiles_dir)
+    if not profiles_path.exists():
+        return []
+    gathered: List[Dict[str, Any]] = []
+    for entry in sorted(profiles_path.iterdir()):
+        if entry.suffix != ".json" or entry.name == "index.json":
+            continue
+        try:
+            data = json.loads(entry.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(data, dict) and ("id" in data or "embedding" in data):
+            gathered.append(data)
+    return gathered
+
+
+def _cluster_source(segments_for_cluster: Sequence[dict]) -> Optional[str]:
+    """Return the single audio ``source`` (e.g. "mic"/"system") for a cluster.
+
+    Diarisation runs per-source with a speaker-id offset, so every segment of
+    one cluster shares the same source. We return the first non-empty source we
+    see, or ``None`` when no segment carries one (legacy transcripts).
+    """
+    for seg in segments_for_cluster:
+        source = seg.get("source")
+        if source:
+            return str(source)
+    return None
+
+
+def _split_ranges_into_windows(
+    ranges: Sequence[Tuple[float, float]], n_windows: int
+) -> List[Tuple[str, Tuple[float, float]]]:
+    """Split a cluster's chronological speech ``ranges`` into ``n_windows``
+    roughly-equal speech-duration windows.
+
+    Returns a list of ``(label, (start, end))`` tuples where ``label`` is
+    ``"window-{i}"`` (1-indexed) and the ``(start, end)`` ranges are cut from the
+    original ranges so total window speech ~= total cluster speech / n_windows.
+    Ranges shorter than ``MINIMUM_SEGMENT_SECONDS`` after cutting are dropped.
+
+    Pure and deterministic: no audio/ML/filesystem. Used to build the
+    ``windowMatches`` entries that feed mixed-cluster detection.
+    """
+    if n_windows <= 0 or not ranges:
+        return []
+    total = sum(end - start for start, end in ranges)
+    if total <= 0:
+        return []
+    target_per_window = total / n_windows
+    windows: List[Tuple[str, Tuple[float, float]]] = []
+    # Walk the chronological ranges accumulating speech; emit a window each time
+    # we reach the next target boundary, cutting mid-range when needed.
+    range_iter = iter([(float(s), float(e)) for s, e in ranges])
+    cur_start, cur_end = next(range_iter, (0.0, 0.0))
+    cur_pos = cur_start
+    for i in range(1, n_windows + 1):
+        remaining = target_per_window
+        win_start: Optional[float] = None
+        win_end: Optional[float] = None
+        # For the last window, consume everything left so rounding never drops
+        # trailing speech.
+        is_last = i == n_windows
+        while remaining > 1e-9 and cur_end > cur_pos:
+            available = cur_end - cur_pos
+            if win_start is None:
+                win_start = cur_pos
+            take = available if (is_last or available <= remaining + 1e-9) else remaining
+            cur_pos += take
+            remaining -= take
+            win_end = cur_pos
+            if cur_pos >= cur_end - 1e-9:
+                cur_start, cur_end = next(range_iter, (0.0, 0.0))
+                cur_pos = cur_start
+                if cur_end <= cur_pos:
+                    break
+        if win_start is not None and win_end is not None:
+            if win_end - win_start >= MINIMUM_SEGMENT_SECONDS:
+                windows.append((f"window-{i}", (win_start, win_end)))
+    return windows
+
+
+# Type aliases for the dependency-injection hooks below. Kept loose (dict in /
+# dict out) to match the existing extraction/matching return shapes.
+ExtractClusterFn = Callable[..., Dict[str, Any]]
+ExtractWindowFn = Callable[..., Dict[str, Any]]
+MatchFn = Callable[..., Dict[str, Any]]
+
+
+def _default_extract_cluster(
+    segments_for_cluster: Sequence[dict],
+    *,
+    audio_paths: Dict[str, Path],
+    source: Optional[str],
+    provider: str,
+    minimum_speech_seconds: float,
+) -> Dict[str, Any]:
+    """Default whole-cluster extraction using the existing backend support.
+
+    Resolves the cluster's audio ``source`` to a WAV path (falling back to any
+    single available path when the transcript carries no source), then delegates
+    to :func:`extract_speaker_segments`. Returns the extraction result dict
+    (``status`` ``"ok"`` / ``"too_short"``).
+    """
+    wav_path = _resolve_source_wav(audio_paths, source)
+    if wav_path is None or not wav_path.exists():
+        return _too_short_result(None, provider, 0.0, segment_count=0)
+    return extract_speaker_segments(
+        audio_path=wav_path,
+        segments=segments_for_cluster,
+        speaker_id=str(segments_for_cluster[0].get("speaker_id", "")) if segments_for_cluster else "",
+        provider=provider,
+        minimum_speech_seconds=minimum_speech_seconds,
+    )
+
+
+def _default_extract_window(
+    segments_for_cluster: Sequence[dict],
+    *,
+    window_range: Tuple[float, float],
+    audio_paths: Dict[str, Path],
+    source: Optional[str],
+    provider: str,
+    minimum_speech_seconds: float,
+) -> Dict[str, Any]:
+    """Default per-window extraction: extract one cluster embedding restricted
+    to ``window_range`` (a single ``(start, end)`` clipped against the cluster's
+    segments).
+    """
+    wav_path = _resolve_source_wav(audio_paths, source)
+    if wav_path is None or not wav_path.exists():
+        return _too_short_result(None, provider, 0.0, segment_count=0)
+    return extract_speaker_segments(
+        audio_path=wav_path,
+        segments=segments_for_cluster,
+        speaker_id=str(segments_for_cluster[0].get("speaker_id", "")) if segments_for_cluster else "",
+        provider=provider,
+        minimum_speech_seconds=minimum_speech_seconds,
+        ranges=[window_range],
+    )
+
+
+def _resolve_source_wav(
+    audio_paths: Dict[str, Path], source: Optional[str]
+) -> Optional[Path]:
+    """Pick the WAV path for a cluster's ``source``.
+
+    If the transcript carries an explicit source and we have a path for it, use
+    it. Otherwise fall back to any single available path so the adapter still
+    works for legacy single-track transcripts. Returns ``None`` when no audio is
+    available at all.
+    """
+    if source and source in audio_paths:
+        return Path(audio_paths[source])
+    if source:
+        # Source is known but we have no matching path: try a case-insensitive
+        # match before giving up (e.g. transcript "mic" vs key "Mic").
+        for key, path in audio_paths.items():
+            if str(key).lower() == str(source).lower():
+                return Path(path)
+    if len(audio_paths) == 1:
+        return Path(next(iter(audio_paths.values())))
+    # No source and 0 or >1 ambiguous paths: only fall back to the first path
+    # when there's at least one available (single-track legacy transcripts).
+    if audio_paths:
+        first_key = next(iter(audio_paths))
+        return Path(audio_paths[first_key])
+    return None
+
+
+def suggest_labels(
+    *,
+    segments: Sequence[dict],
+    audio_paths: Dict[str, Path],
+    profiles: Sequence[Dict[str, Any]],
+    provider: str,
+    threshold: float,
+    margin: float,
+    minimum_speech_seconds: float = 8.0,
+    n_windows: int = 0,
+    session: Optional[str] = None,
+    generated_at: Optional[str] = None,
+    extract_cluster_fn: Optional[ExtractClusterFn] = None,
+    extract_window_fn: Optional[ExtractWindowFn] = None,
+    match_fn: Optional[MatchFn] = None,
+) -> Dict[str, Any]:
+    """Matching adapter: compute cluster/window match results and feed them to
+    the pure label-suggestion grouping logic.
+
+    This is the bridge between real extraction/matching (audio + ML) and the
+    pure, I/O-free :func:`build_label_suggestions`. It:
+
+      1. Groups transcript ``segments`` by ``speaker_id`` (one cluster each).
+      2. For each cluster with usable speech, extracts one embedding (via the
+         existing backend extraction support, or ``extract_cluster_fn``).
+      3. Matches each embedding against ``profiles`` (via :func:`match_candidate`
+         or ``match_fn``).
+      4. Optionally splits each cluster into ``n_windows`` chronological windows,
+         extracting + matching each for mixed-cluster detection.
+      5. Hands the computed per-cluster / per-window results to
+         :func:`build_label_suggestions` and returns its output.
+
+    Args:
+        segments: Transcript segments, each carrying ``speaker_id``, ``source``
+            (``"mic"``/``"system"``), ``start_time``/``start``,
+            ``end_time``/``end``, and optional ``text``.
+        audio_paths: Mapping of source name (``"mic"``/``"system"``) to WAV path.
+            A single-track transcript can pass ``{"default": <path>}``.
+        profiles: Enrolled profiles in the shape :func:`match_candidate` expects
+            (``id``, ``displayName``, ``embeddingProvider``, ``embeddingModel``,
+            ``embedding``). Empty when no profiles are enrolled.
+        provider: Embedding provider name (e.g. ``"mfcc-test"``, ``"speechbrain"``).
+        threshold/margin: Matching thresholds; echoed into the output ``config``.
+        minimum_speech_seconds: Minimum speech to extract a cluster embedding.
+        n_windows: If > 0, split each cluster into this many chronological
+            windows for mixed-cluster detection. 0 disables window matching.
+        session/generated_at: Optional provenance metadata.
+        extract_cluster_fn / extract_window_fn / match_fn: Dependency-injection
+            hooks for unit testing. Each defaults to the real backend. Signatures
+            match :func:`_default_extract_cluster` /
+            :func:`_default_extract_window` / :func:`match_candidate`.
+
+    Returns the suggestion JSON (see :func:`build_label_suggestions`) conforming
+    to ``schemaVersion`` 1. **Never** writes files, mutates the transcript, or
+    modifies enrolled profiles.
+    """
+    # Resolve the injection hooks to their real-backend defaults.
+    do_extract_cluster: ExtractClusterFn = extract_cluster_fn or _default_extract_cluster
+    do_extract_window: ExtractWindowFn = extract_window_fn or _default_extract_window
+    do_match: MatchFn = match_fn or match_candidate
+
+    # ---- Group segments into clusters by speaker_id ----
+    clusters: Dict[str, List[dict]] = {}
+    for seg in segments:
+        speaker_id = seg.get("speaker_id")
+        if speaker_id is None:
+            continue
+        key = str(speaker_id)
+        clusters.setdefault(key, []).append(seg)
+
+    # Stable, deterministic processing order: numeric-aware speaker-id sort so
+    # "10" sorts after "2". Falls back to plain string sort for non-numeric ids.
+    def _sort_key(sid: str):
+        try:
+            return (0, int(sid), "")
+        except ValueError:
+            return (1, 0, sid)
+
+    ordered_speakers = sorted(clusters.keys(), key=_sort_key)
+
+    cluster_results: List[Dict[str, Any]] = []
+    resolved_model: Optional[str] = None
+    for speaker_id in ordered_speakers:
+        cluster_segments = clusters[speaker_id]
+        source = _cluster_source(cluster_segments)
+
+        extraction = do_extract_cluster(
+            cluster_segments,
+            audio_paths=audio_paths,
+            source=source,
+            provider=provider,
+            minimum_speech_seconds=minimum_speech_seconds,
+        )
+
+        match_result: Dict[str, Any] = {
+            "bestMatch": None,
+            "candidates": [],
+            "skippedProfiles": [],
+            "warnings": [],
+        }
+        if extraction.get("status") == "ok" and extraction.get("embedding") is not None:
+            match_result = do_match(
+                extraction,
+                profiles,
+                threshold,
+                margin,
+            )
+            # All clusters share the provider, so the embedding model is the same
+            # for every cluster. Capture it from the first successful extraction.
+            if resolved_model is None and extraction.get("model"):
+                resolved_model = extraction.get("model")
+
+        cluster_entry: Dict[str, Any] = {
+            "speakerId": speaker_id,
+            "source": source,
+            "match": match_result,
+            "durationSeconds": extraction.get("durationSeconds"),
+            "segmentCount": extraction.get("segmentCount"),
+            "selectedRanges": extraction.get("selectedRanges"),
+            "speechSeconds": extraction.get("selectedSpeechSeconds"),
+            "status": extraction.get("status"),
+        }
+
+        # ---- Optional chronological window matching (mixed-cluster) ----
+        if n_windows > 0 and extraction.get("status") == "ok":
+            selected_ranges = extraction.get("selectedRanges") or []
+            # Normalise to (start, end) tuples for the pure splitter.
+            range_tuples: List[Tuple[float, float]] = [
+                (float(r[0]), float(r[1])) for r in selected_ranges
+            ]
+            windows = _split_ranges_into_windows(range_tuples, n_windows)
+            window_matches: List[Dict[str, Any]] = []
+            for label, wrange in windows:
+                win_extraction = do_extract_window(
+                    cluster_segments,
+                    window_range=wrange,
+                    audio_paths=audio_paths,
+                    source=source,
+                    provider=provider,
+                    minimum_speech_seconds=minimum_speech_seconds,
+                )
+                win_match: Dict[str, Any] = {
+                    "bestMatch": None,
+                    "candidates": [],
+                    "skippedProfiles": [],
+                    "warnings": [],
+                }
+                if (
+                    win_extraction.get("status") == "ok"
+                    and win_extraction.get("embedding") is not None
+                ):
+                    win_match = do_match(win_extraction, profiles, threshold, margin)
+                window_matches.append(
+                    {
+                        "label": label,
+                        "range": [wrange[0], wrange[1]],
+                        "match": win_match,
+                    }
+                )
+            if window_matches:
+                cluster_entry["windowMatches"] = window_matches
+
+        cluster_results.append(cluster_entry)
+
+    return build_label_suggestions(
+        cluster_results,
+        profiles=profiles,
+        threshold=threshold,
+        margin=margin,
+        session=session,
+        provider=provider,
+        model=resolved_model,
+        generated_at=generated_at,
+    )
 
 
 # ---------------------------------------------------------------------------
