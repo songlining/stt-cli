@@ -1607,12 +1607,13 @@ class TestEnrollRangesDryRunEndToEnd:
         assert not (session / ".speaker-clips").exists()
         assert not (session / helper.AUDIT_FILENAME).exists()
 
-    def test_dry_run_without_no_enroll_flag_is_also_safe(self, tmp_path, capsys):
-        """This version implements ONLY dry-run behavior; omitting --no-enroll
-        must still NOT enroll (the flag is accepted but is the only mode)."""
+    def test_default_path_generates_sample_without_enrolling(self, tmp_path, capsys):
+        """Without --no-enroll, the command generates a sample but still does
+        NOT enroll a profile (task 03b contract). It needs source audio."""
         # Arrange
         segments = [_seg(4, 0.0, 10.0, "hello world")]
         session = self._make_session(tmp_path, segments)
+        _write_wav(session / "system.wav", _tone(11.0))
         # Act
         helper.main(
             [
@@ -1624,16 +1625,18 @@ class TestEnrollRangesDryRunEndToEnd:
                 # no --no-enroll
             ]
         )
-        # Assert: still a dry run; nothing written.
+        # Assert: sample generated, but no profile enrollment.
         payload = json.loads(capsys.readouterr().out)
-        assert payload["status"] == "dry_run"
-        assert not (session / ".speaker-clips").exists()
+        assert payload["status"] == "sample_ready"
+        assert payload["enrolled"] is False
+        assert payload["mutated_profiles"] is False
+        assert (session / ".speaker-clips").is_dir()
 
     def test_source_override_is_respected(self, tmp_path, capsys):
         # Arrange: transcript source is 'system' but --source mic overrides.
         segments = [_seg(4, 0.0, 10.0, "hi", source="system")]
         session = self._make_session(tmp_path, segments)
-        # Act
+        # Act (use --no-enroll to stay in validation-only mode)
         helper.main(
             [
                 "enroll-ranges",
@@ -1642,6 +1645,7 @@ class TestEnrollRangesDryRunEndToEnd:
                 "--range", "2-8",
                 "--name", "Domingo",
                 "--source", "mic",
+                "--no-enroll",
             ]
         )
         # Assert
@@ -1652,7 +1656,7 @@ class TestEnrollRangesDryRunEndToEnd:
         # Arrange: transcript segments carry source='mic'.
         segments = [_seg(4, 0.0, 10.0, "hi", source="mic")]
         session = self._make_session(tmp_path, segments)
-        # Act
+        # Act (use --no-enroll to stay in validation-only mode)
         helper.main(
             [
                 "enroll-ranges",
@@ -1660,6 +1664,7 @@ class TestEnrollRangesDryRunEndToEnd:
                 "--speaker-id", "4",
                 "--range", "2-8",
                 "--name", "Domingo",
+                "--no-enroll",
             ]
         )
         # Assert
@@ -1668,6 +1673,173 @@ class TestEnrollRangesDryRunEndToEnd:
 
     def test_multiple_ranges_select_disjoint_speech(self, tmp_path, capsys):
         # Arrange: two disjoint ranges, each with useful speech.
+        segments = [
+            _seg(4, 0.0, 5.0, "a"),
+            _seg(4, 100.0, 105.0, "b"),
+        ]
+        session = self._make_session(tmp_path, segments)
+        # Act (use --no-enroll to stay in validation-only mode)
+        helper.main(
+            [
+                "enroll-ranges",
+                "--session", str(session),
+                "--speaker-id", "4",
+                "--range", "0-5",
+                "--range", "100-105",
+                "--name", "Domingo",
+                "--no-enroll",
+            ]
+        )
+        # Assert: both ranges selected speech.
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["selected_segment_count"] == 2
+        assert payload["selected_ranges"] == [[0.0, 5.0], [100.0, 105.0]]
+
+    def test_dry_run_next_step_points_at_sample_generation(self, tmp_path, capsys):
+        # Arrange
+        segments = [_seg(4, 0.0, 10.0, "hi")]
+        session = self._make_session(tmp_path, segments)
+        # Act (validation-only dry run)
+        helper.main(
+            [
+                "enroll-ranges",
+                "--session", str(session),
+                "--speaker-id", "4",
+                "--range", "2-8",
+                "--name", "Domingo",
+                "--no-enroll",
+            ]
+        )
+        # Assert: a recommended next implementation step is present.
+        payload = json.loads(capsys.readouterr().out)
+        assert "next_step" in payload and payload["next_step"]
+        assert "03c" in payload["next_step"]
+
+
+# ===========================================================================
+# Task 03b: enroll-ranges sample generation and metadata
+# ===========================================================================
+
+
+class TestEnrollRangesSampleToken:
+    """Unit: sample/metadata paths are deterministic and under .speaker-clips."""
+
+    def test_token_is_deterministic_for_identical_requests(self):
+        # Arrange
+        ranges = [(2.0, 12.0), (30.0, 40.0)]
+        # Act
+        t1 = helper._enroll_ranges_sample_token("4", "system", ranges, 60.0, True)
+        t2 = helper._enroll_ranges_sample_token("4", "system", ranges, 60.0, True)
+        # Assert
+        assert t1 == t2
+        assert len(t1) == 12
+
+    def test_token_differs_when_ranges_differ(self):
+        # Arrange / Act
+        t1 = helper._enroll_ranges_sample_token("4", "system", [(2.0, 12.0)], 60.0, True)
+        t2 = helper._enroll_ranges_sample_token("4", "system", [(2.0, 20.0)], 60.0, True)
+        # Assert
+        assert t1 != t2
+
+    def test_token_differs_when_speaker_or_source_or_normalize_differ(self):
+        base = helper._enroll_ranges_sample_token("4", "system", [(2.0, 12.0)], 60.0, True)
+        assert base != helper._enroll_ranges_sample_token("5", "system", [(2.0, 12.0)], 60.0, True)
+        assert base != helper._enroll_ranges_sample_token("4", "mic", [(2.0, 12.0)], 60.0, True)
+        assert base != helper._enroll_ranges_sample_token("4", "system", [(2.0, 12.0)], 60.0, False)
+
+    def test_sample_and_metadata_paths_under_clips_dir(self, tmp_path):
+        # Arrange
+        session = tmp_path / "session"
+        session.mkdir()
+        ranges = [(2.0, 8.0)]
+        from pathlib import Path
+        speaker = {"source": "system"}
+        transcript_path = session / "transcript.json"
+        src_wav = session / "system.wav"
+        # Act: drive the pure path-computation portion by building the token +
+        # expected paths the same way build_enroll_sample does.
+        token = helper._enroll_ranges_sample_token("4", "system", ranges, 60.0, True)
+        clips_dir = session / helper.CLIPS_DIR_NAME
+        sample = clips_dir / f"speaker-4-enroll-ranges-{token}-norm.wav"
+        meta = clips_dir / f"speaker-4-enroll-ranges-{token}-norm.enroll.json"
+        # Assert: both paths are strictly under <session>/.speaker-clips/.
+        assert sample.parent == clips_dir
+        assert meta.parent == clips_dir
+        assert str(sample.resolve()).startswith(str(clips_dir.resolve()))
+        assert str(meta.resolve()).startswith(str(clips_dir.resolve()))
+
+
+class TestEnrollRangesSampleGenerationEndToEnd:
+    """Integration/e2e: enroll-ranges sample WAV + metadata generation."""
+
+    def _make_session(self, tmp_path: Path, segments) -> Path:
+        session = tmp_path / "session"
+        session.mkdir()
+        last_end = max((s["end_time"] for s in segments), default=30.0)
+        # System source WAV long enough to cover all segment ranges.
+        _write_wav(session / "system.wav", _tone(last_end + 1.0))
+        _write_transcript(session / "transcript.json", segments)
+        return session
+
+    def test_generates_sample_wav_and_metadata_json(self, tmp_path, capsys):
+        # Arrange: speaker 4 has speech in 0-5 and 10-15.
+        segments = [
+            _seg(4, 0.0, 5.0, "hello world"),
+            _seg(4, 10.0, 15.0, "more speech"),
+        ]
+        session = self._make_session(tmp_path, segments)
+        # Act
+        helper.main(
+            [
+                "enroll-ranges",
+                "--session", str(session),
+                "--speaker-id", "4",
+                "--range", "2-12",
+                "--name", "Domingo",
+            ]
+        )
+        # Assert
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["action"] == "enroll-ranges"
+        assert payload["status"] == "sample_ready"
+        assert payload["enrolled"] is False
+        assert payload["mutated_profiles"] is False
+        sample_path = Path(payload["sample_path"])
+        meta_path = Path(payload["metadata_path"])
+        assert sample_path.exists()
+        assert meta_path.exists()
+        # Both under <session>/.speaker-clips/.
+        clips_dir = (session / helper.CLIPS_DIR_NAME).resolve()
+        assert str(sample_path.resolve()).startswith(str(clips_dir))
+        assert str(meta_path.resolve()).startswith(str(clips_dir))
+
+    def test_sample_wav_is_openable_by_python_wave(self, tmp_path, capsys):
+        # Arrange
+        segments = [_seg(4, 0.0, 10.0, "hello world")]
+        session = self._make_session(tmp_path, segments)
+        # Act
+        helper.main(
+            [
+                "enroll-ranges",
+                "--session", str(session),
+                "--speaker-id", "4",
+                "--range", "1-8",
+                "--name", "Domingo",
+            ]
+        )
+        payload = json.loads(capsys.readouterr().out)
+        sample_path = Path(payload["sample_path"])
+        # Assert: plain PCM WAV readable by Python's wave module.
+        with wave.open(str(sample_path), "rb") as handle:
+            assert handle.getnchannels() == 1
+            assert handle.getsampwidth() == 2
+            assert handle.getframerate() == 16000
+            assert handle.getnframes() > 0
+            # comptype NONE == plain PCM (not compressed).
+            assert handle.getcomptype() == "NONE"
+
+    def test_metadata_contains_required_provenance_fields(self, tmp_path, capsys):
+        # Arrange: two disjoint ranges.
         segments = [
             _seg(4, 0.0, 5.0, "a"),
             _seg(4, 100.0, 105.0, "b"),
@@ -1684,14 +1856,32 @@ class TestEnrollRangesDryRunEndToEnd:
                 "--name", "Domingo",
             ]
         )
-        # Assert: both ranges selected speech.
         payload = json.loads(capsys.readouterr().out)
-        assert payload["selected_segment_count"] == 2
-        assert payload["selected_ranges"] == [[0.0, 5.0], [100.0, 105.0]]
+        meta = json.loads(Path(payload["metadata_path"]).read_text(encoding="utf-8"))
+        # Assert: required metadata fields per the task spec.
+        assert meta["source_session"] == str(session.resolve())
+        assert meta["speaker_id"] == "4"
+        assert meta["source_track"] == "system"
+        # requested ranges captured.
+        assert meta["requested_ranges"] == [[0.0, 5.0], [100.0, 105.0]]
+        # selected ranges captured.
+        assert meta["selected_ranges"] == [[0.0, 5.0], [100.0, 105.0]]
+        assert meta["selected_segment_count"] == 2
+        assert meta["selected_speech_seconds"] > 0.0
+        # sample path captured.
+        assert meta["sample_path"] == payload["sample_path"]
+        # no enrollment happened.
+        assert meta["enrolled"] is False
 
-    def test_next_step_recommends_task_03b(self, tmp_path, capsys):
-        # Arrange
-        segments = [_seg(4, 0.0, 10.0, "hi")]
+    def test_sample_only_contains_requested_ranges_not_whole_cluster(
+        self, tmp_path, capsys
+    ):
+        # Arrange: speaker has speech at 0-5, 50-55, 100-105. Request only 50-55.
+        segments = [
+            _seg(4, 0.0, 5.0, "early"),
+            _seg(4, 50.0, 55.0, "middle"),
+            _seg(4, 100.0, 105.0, "late"),
+        ]
         session = self._make_session(tmp_path, segments)
         # Act
         helper.main(
@@ -1699,11 +1889,91 @@ class TestEnrollRangesDryRunEndToEnd:
                 "enroll-ranges",
                 "--session", str(session),
                 "--speaker-id", "4",
-                "--range", "2-8",
+                "--range", "50-55",
                 "--name", "Domingo",
             ]
         )
-        # Assert: a recommended next implementation step is present.
         payload = json.loads(capsys.readouterr().out)
-        assert "next_step" in payload and payload["next_step"]
-        assert "03b" in payload["next_step"]
+        # Assert: only the requested range selected (~5s), not the whole cluster.
+        assert payload["selected_segment_count"] == 1
+        assert payload["selected_ranges"] == [[50.0, 55.0]]
+        # The sample duration is ~5s, not ~15s (whole cluster).
+        assert payload["sample_duration_seconds"] <= 5.5
+        assert payload["sample_duration_seconds"] >= 4.5
+
+    def test_no_profile_is_created_or_modified(self, tmp_path, capsys, monkeypatch):
+        # Arrange: point profiles dir at an empty temp dir.
+        profiles_dir = tmp_path / "profiles"
+        profiles_dir.mkdir()
+        monkeypatch.setenv("STT_SPEAKER_PROFILES_DIR", str(profiles_dir))
+        segments = [_seg(4, 0.0, 10.0, "hi")]
+        session = self._make_session(tmp_path, segments)
+        names_before = sorted(p.name for p in profiles_dir.iterdir())
+        # Act
+        helper.main(
+            [
+                "enroll-ranges",
+                "--session", str(session),
+                "--speaker-id", "4",
+                "--range", "1-8",
+                "--name", "Domingo",
+            ]
+        )
+        capsys.readouterr()  # drain
+        # Assert: profiles dir untouched.
+        names_after = sorted(p.name for p in profiles_dir.iterdir())
+        assert names_before == names_after
+
+    def test_dry_run_still_writes_no_files(self, tmp_path, capsys):
+        # Arrange
+        segments = [_seg(4, 0.0, 10.0, "hi")]
+        session = self._make_session(tmp_path, segments)
+        names_before = sorted(p.name for p in session.iterdir())
+        # Act
+        helper.main(
+            [
+                "enroll-ranges",
+                "--session", str(session),
+                "--speaker-id", "4",
+                "--range", "1-8",
+                "--name", "Domingo",
+                "--no-enroll",
+            ]
+        )
+        capsys.readouterr()  # drain
+        # Assert: --no-enroll still writes nothing.
+        names_after = sorted(p.name for p in session.iterdir())
+        assert names_before == names_after
+        assert not (session / ".speaker-clips").exists()
+
+    def test_backend_failure_surfaces_json_error_without_fallback(self, tmp_path, capsys):
+        # Arrange: source WAV exists (so source_wav() validation passes) but is
+        # not a valid WAV, so the backend concatenate fails. This exercises the
+        # structured-JSON-error path without falling back to whole-cluster audio.
+        segments = [_seg(4, 0.0, 10.0, "hi", source="mic")]
+        session = tmp_path / "session"
+        session.mkdir()
+        _write_transcript(session / "transcript.json", segments)
+        # Create a *corrupt* mic.wav (not a valid WAV file).
+        (session / "mic.wav").write_bytes(b"not a wav file")
+        # Act / Assert: emits a structured JSON error, exits 1.
+        with pytest.raises(SystemExit) as exc:
+            helper.main(
+                [
+                    "enroll-ranges",
+                    "--session", str(session),
+                    "--speaker-id", "4",
+                    "--range", "1-8",
+                    "--name", "Domingo",
+                    "--source", "mic",
+                ]
+            )
+        # SystemExit code is 1 for the error path.
+        assert exc.value.code == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "error"
+        assert "error" in payload
+        assert payload["enrolled"] is False
+        assert payload["mutated_profiles"] is False
+        # No sample written on backend failure.
+        assert "sample_path" not in payload
