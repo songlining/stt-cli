@@ -2366,3 +2366,365 @@ class TestSuggestLabelsCommand:
         capsys.readouterr()  # drain
         # Assert: transcript bytes unchanged.
         assert transcript.read_bytes() == before
+
+
+# ===========================================================================
+# Task 10: segment-level transcript relabeling
+# ===========================================================================
+
+
+class TestSegmentOverlapsRanges:
+    """Unit: segment_overlaps_ranges half-open interval overlap."""
+
+    def test_none_ranges_means_whole_cluster_relabel(self):
+        assert helper.segment_overlaps_ranges(100.0, 105.0, None) is True
+
+    def test_overlapping_range_matches(self):
+        assert helper.segment_overlaps_ranges(2.0, 8.0, [(0.0, 5.0)]) is True
+
+    def test_non_overlapping_range_does_not_match(self):
+        assert helper.segment_overlaps_ranges(50.0, 55.0, [(0.0, 5.0)]) is False
+
+    def test_multiple_ranges_any_match_is_sufficient(self):
+        assert helper.segment_overlaps_ranges(50.0, 55.0, [(0.0, 5.0), (49.0, 60.0)]) is True
+
+    def test_boundary_touching_is_not_overlap(self):
+        # Half-open: [5.0, 10.0] vs range (0.0, 5.0) -- seg_start(5.0) is not < req_end(5.0).
+        assert helper.segment_overlaps_ranges(5.0, 10.0, [(0.0, 5.0)]) is False
+
+
+class TestSelectRelabelSegments:
+    """Unit: select_relabel_segments filters by speaker id + range overlap."""
+
+    def test_selects_all_segments_for_speaker_when_no_ranges(self):
+        segments = [
+            _seg(4, 0.0, 5.0, "early"),
+            _seg(4, 200.0, 205.0, "late"),
+            _seg(5, 10.0, 15.0, "other speaker"),
+        ]
+        indices = helper.select_relabel_segments(segments, "4")
+        assert indices == [0, 1]
+
+    def test_selects_only_segments_overlapping_requested_ranges(self):
+        segments = [
+            _seg(4, 0.0, 5.0, "early"),
+            _seg(4, 200.0, 205.0, "late"),
+        ]
+        indices = helper.select_relabel_segments(segments, "4", ranges=[(0.0, 12.0)])
+        assert indices == [0]
+
+    def test_includes_bracket_only_nonspeech_segments(self):
+        # Relabeling is whole-presence, not useful-speech-only.
+        segments = [_seg(4, 0.0, 5.0, "[Silence]")]
+        indices = helper.select_relabel_segments(segments, "4")
+        assert indices == [0]
+
+    def test_skips_segments_without_usable_timestamps_when_ranges_given(self):
+        segments = [
+            {"speaker_id": "4", "start_time": None, "end_time": None, "text": "bad"},
+            _seg(4, 0.0, 5.0, "ok"),
+        ]
+        indices = helper.select_relabel_segments(segments, "4", ranges=[(0.0, 12.0)])
+        assert indices == [1]
+
+    def test_ignores_segments_for_other_speakers(self):
+        segments = [_seg(4, 0.0, 5.0, "a"), _seg(5, 0.0, 5.0, "b")]
+        indices = helper.select_relabel_segments(segments, "5")
+        assert indices == [1]
+
+
+class TestApplyRelabelToSegments:
+    """Unit: apply_relabel_to_segments sets speaker_name only on selected indices."""
+
+    def test_sets_name_only_on_selected_indices(self):
+        segments = [_seg(4, 0.0, 5.0, "early"), _seg(4, 200.0, 205.0, "late")]
+        result = helper.apply_relabel_to_segments(segments, [0], "Domingo")
+        assert result[0]["speaker_name"] == "Domingo"
+        assert "speaker_name" not in result[1] or result[1].get("speaker_name") != "Domingo"
+
+    def test_preserves_speaker_id_source_timestamps_and_text(self):
+        segments = [_seg(4, 12.0, 18.0, "hello", source="mic")]
+        result = helper.apply_relabel_to_segments(segments, [0], "Domingo")
+        assert result[0]["speaker_id"] == "4"
+        assert result[0]["source"] == "mic"
+        assert result[0]["start_time"] == 12.0
+        assert result[0]["end_time"] == 18.0
+        assert result[0]["text"] == "hello"
+
+    def test_does_not_mutate_the_input_list(self):
+        segments = [_seg(4, 0.0, 5.0, "early")]
+        original_copy = dict(segments[0])
+        helper.apply_relabel_to_segments(segments, [0], "Domingo")
+        assert segments[0] == original_copy
+
+    def test_preserves_prior_relabel_on_non_selected_segments(self):
+        segments = [_seg(4, 0.0, 5.0, "early"), _seg(4, 200.0, 205.0, "late")]
+        segments[1]["speaker_name"] = "Gia"
+        result = helper.apply_relabel_to_segments(segments, [0], "Domingo")
+        assert result[0]["speaker_name"] == "Domingo"
+        assert result[1]["speaker_name"] == "Gia"
+
+    def test_mixed_cluster_can_carry_two_names_after_two_relabel_calls(self):
+        # The ASX Speaker 4 case: early -> Domingo, late -> Gia.
+        segments = [_seg(4, 0.0, 5.0, "early"), _seg(4, 200.0, 205.0, "late")]
+        after_first = helper.apply_relabel_to_segments(segments, [0], "Domingo")
+        after_second = helper.apply_relabel_to_segments(after_first, [1], "Gia")
+        assert after_second[0]["speaker_name"] == "Domingo"
+        assert after_second[1]["speaker_name"] == "Gia"
+        assert after_second[0]["speaker_id"] == after_second[1]["speaker_id"] == "4"
+
+
+class TestRenderTranscriptText:
+    """Unit: render_transcript_text mirrors Swift TranscriptMerger.renderPlainText."""
+
+    def test_uses_speaker_name_when_present(self):
+        segments = [_seg(4, 0.0, 5.0, "hello", source="system")]
+        segments[0]["speaker_name"] = "Domingo"
+        text = helper.render_transcript_text(segments)
+        assert text == "[0.00 - 5.00] System Domingo: hello\n"
+
+    def test_falls_back_to_speaker_id_when_no_name(self):
+        segments = [_seg(4, 0.0, 5.0, "hello", source="mic")]
+        text = helper.render_transcript_text(segments)
+        assert text == "[0.00 - 5.00] Mic Speaker 4: hello\n"
+
+    def test_omits_speaker_suffix_when_neither_name_nor_id(self):
+        segments = [{"start_time": 0.0, "end_time": 5.0, "text": "hi", "source": "mic"}]
+        text = helper.render_transcript_text(segments)
+        assert text == "[0.00 - 5.00] Mic: hi\n"
+
+    def test_joins_multiple_segments_with_newlines(self):
+        segments = [
+            _seg(4, 0.0, 5.0, "a", source="mic"),
+            _seg(5, 5.0, 10.0, "b", source="system"),
+        ]
+        text = helper.render_transcript_text(segments)
+        assert text == "[0.00 - 5.00] Mic Speaker 4: a\n[5.00 - 10.00] System Speaker 5: b\n"
+
+
+class TestRelabelArgParsing:
+    """Unit: relabel CLI argument parsing."""
+
+    def test_parses_required_and_repeated_range_flags(self):
+        parser = helper.build_parser()
+        args = parser.parse_args([
+            "relabel", "--session", "/tmp/sess", "--speaker-id", "4",
+            "--range", "0-12", "--range", "200-212", "--name", "Domingo",
+        ])
+        assert args.session == "/tmp/sess"
+        assert args.speaker_id == "4"
+        assert args.range == ["0-12", "200-212"]
+        assert args.name == "Domingo"
+        assert args.dry_run is False
+
+    def test_dry_run_flag_defaults_false(self):
+        parser = helper.build_parser()
+        args = parser.parse_args([
+            "relabel", "--session", "/tmp/sess", "--speaker-id", "4", "--name", "Domingo",
+        ])
+        assert args.dry_run is False
+        assert args.range is None
+
+    def test_dry_run_flag_parses(self):
+        parser = helper.build_parser()
+        args = parser.parse_args([
+            "relabel", "--session", "/tmp/sess", "--speaker-id", "4",
+            "--name", "Domingo", "--dry-run",
+        ])
+        assert args.dry_run is True
+
+
+class TestRelabelDryRunEndToEnd:
+    """Integration/e2e: relabel --dry-run reports planned changes, writes nothing."""
+
+    def _make_session(self, tmp_path: Path, segments) -> Path:
+        session = tmp_path / "session"
+        session.mkdir()
+        _write_transcript(session / "transcript.json", segments)
+        return session
+
+    def test_dry_run_reports_changed_count_without_writing(self, tmp_path, capsys):
+        segments = [
+            _seg(4, 0.0, 5.0, "early"),
+            _seg(4, 200.0, 205.0, "late"),
+        ]
+        session = self._make_session(tmp_path, segments)
+        before_transcript = (session / "transcript.json").read_bytes()
+        names_before = sorted(p.name for p in session.iterdir())
+
+        helper.main([
+            "relabel", "--session", str(session), "--speaker-id", "4",
+            "--range", "0-12", "--name", "Domingo", "--dry-run",
+        ])
+
+        out = json.loads(capsys.readouterr().out)
+        assert out["action"] == "relabel"
+        assert out["status"] == "dry_run"
+        assert out["changed_segment_count"] == 1
+        assert out["changed_indices"] == [0]
+        assert out["mutated_files"] is False
+        # Nothing written.
+        assert (session / "transcript.json").read_bytes() == before_transcript
+        assert sorted(p.name for p in session.iterdir()) == names_before
+        assert not (session / "transcript.md").exists()
+
+    def test_dry_run_whole_cluster_when_no_range_given(self, tmp_path, capsys):
+        segments = [
+            _seg(4, 0.0, 5.0, "early"),
+            _seg(4, 200.0, 205.0, "late"),
+        ]
+        session = self._make_session(tmp_path, segments)
+
+        helper.main([
+            "relabel", "--session", str(session), "--speaker-id", "4",
+            "--name", "Domingo", "--dry-run",
+        ])
+
+        out = json.loads(capsys.readouterr().out)
+        assert out["changed_segment_count"] == 2
+        assert out["changed_indices"] == [0, 1]
+
+    def test_dry_run_fails_when_no_segments_match(self, tmp_path, capsys):
+        segments = [_seg(4, 0.0, 5.0, "early")]
+        session = self._make_session(tmp_path, segments)
+
+        with pytest.raises(SystemExit):
+            helper.main([
+                "relabel", "--session", str(session), "--speaker-id", "4",
+                "--range", "500-600", "--name", "Domingo", "--dry-run",
+            ])
+
+
+class TestRelabelAppliedEndToEnd:
+    """Integration/e2e: relabel (real run) mutates only selected segments and
+    regenerates transcript.json + transcript.md consistently."""
+
+    def _make_session(self, tmp_path: Path, segments) -> Path:
+        session = tmp_path / "session"
+        session.mkdir()
+        _write_transcript(session / "transcript.json", segments)
+        return session
+
+    def test_relabels_only_selected_range_preserving_speaker_id(self, tmp_path, capsys):
+        # Arrange: the ASX Speaker 4 case -- one cluster, two people.
+        segments = [
+            _seg(4, 0.0, 5.0, "early speech", source="system"),
+            _seg(4, 200.0, 205.0, "late speech", source="system"),
+        ]
+        session = self._make_session(tmp_path, segments)
+
+        # Act: relabel only the early range to Domingo.
+        helper.main([
+            "relabel", "--session", str(session), "--speaker-id", "4",
+            "--range", "0-12", "--name", "Domingo",
+        ])
+        json.loads(capsys.readouterr().out)
+
+        # Assert: transcript.json updated; speaker_id preserved for both.
+        data = json.loads((session / "transcript.json").read_text(encoding="utf-8"))
+        segs = data["segments"]
+        assert segs[0]["speaker_name"] == "Domingo"
+        assert segs[0]["speaker_id"] == "4"
+        assert "speaker_name" not in segs[1] or segs[1].get("speaker_name") != "Domingo"
+        assert segs[1]["speaker_id"] == "4"
+        # Untouched fields preserved.
+        assert segs[0]["start_time"] == 0.0 and segs[0]["end_time"] == 5.0
+        assert segs[0]["text"] == "early speech"
+
+    def test_regenerates_transcript_markdown_consistently(self, tmp_path, capsys):
+        segments = [_seg(4, 0.0, 5.0, "hello", source="system")]
+        session = self._make_session(tmp_path, segments)
+
+        helper.main([
+            "relabel", "--session", str(session), "--speaker-id", "4",
+            "--name", "Domingo",
+        ])
+        json.loads(capsys.readouterr().out)
+
+        md = (session / "transcript.md").read_text(encoding="utf-8")
+        assert md == "[0.00 - 5.00] System Domingo: hello\n"
+        data = json.loads((session / "transcript.json").read_text(encoding="utf-8"))
+        assert data["text"] == md.strip()
+        assert data["diarised_text"] == md.strip()
+
+    def test_two_relabel_calls_give_mixed_cluster_two_names(self, tmp_path, capsys):
+        # Arrange
+        segments = [
+            _seg(4, 0.0, 5.0, "early", source="system"),
+            _seg(4, 200.0, 205.0, "late", source="system"),
+        ]
+        session = self._make_session(tmp_path, segments)
+
+        # Act: relabel early to Domingo, then late to Gia.
+        helper.main([
+            "relabel", "--session", str(session), "--speaker-id", "4",
+            "--range", "0-12", "--name", "Domingo",
+        ])
+        json.loads(capsys.readouterr().out)
+        helper.main([
+            "relabel", "--session", str(session), "--speaker-id", "4",
+            "--range", "195-210", "--name", "Gia",
+        ])
+        json.loads(capsys.readouterr().out)
+
+        # Assert: both names present, same speaker_id.
+        data = json.loads((session / "transcript.json").read_text(encoding="utf-8"))
+        segs = data["segments"]
+        assert segs[0]["speaker_name"] == "Domingo"
+        assert segs[1]["speaker_name"] == "Gia"
+        assert segs[0]["speaker_id"] == segs[1]["speaker_id"] == "4"
+
+    def test_unselected_segments_for_other_speakers_are_unaffected(self, tmp_path, capsys):
+        segments = [
+            _seg(4, 0.0, 5.0, "speaker four", source="system"),
+            _seg(5, 10.0, 15.0, "speaker five", source="system"),
+        ]
+        session = self._make_session(tmp_path, segments)
+
+        helper.main([
+            "relabel", "--session", str(session), "--speaker-id", "4",
+            "--name", "Domingo",
+        ])
+        json.loads(capsys.readouterr().out)
+
+        data = json.loads((session / "transcript.json").read_text(encoding="utf-8"))
+        segs = data["segments"]
+        assert segs[0]["speaker_name"] == "Domingo"
+        assert "speaker_name" not in segs[1]
+        assert segs[1]["speaker_id"] == "5"
+
+    def test_relabels_per_source_json_artifact_when_present(self, tmp_path, capsys):
+        # Arrange: a per-source artifact exists alongside the merged transcript.
+        segments = [_seg(4, 0.0, 5.0, "hello", source="system")]
+        session = self._make_session(tmp_path, segments)
+        per_source = {"segments": [_seg(4, 0.0, 5.0, "hello", source="system")]}
+        (session / "transcript.system.json").write_text(
+            json.dumps(per_source), encoding="utf-8"
+        )
+
+        # Act
+        helper.main([
+            "relabel", "--session", str(session), "--speaker-id", "4",
+            "--name", "Domingo",
+        ])
+        json.loads(capsys.readouterr().out)
+
+        # Assert: per-source JSON also relabeled.
+        src_data = json.loads((session / "transcript.system.json").read_text(encoding="utf-8"))
+        assert src_data["segments"][0]["speaker_name"] == "Domingo"
+        # The per-source .txt (if it existed) would be untouched; none created here.
+        assert not (session / "transcript.system.txt").exists()
+
+    def test_applies_reports_mutated_files_true_and_paths(self, tmp_path, capsys):
+        segments = [_seg(4, 0.0, 5.0, "hello", source="system")]
+        session = self._make_session(tmp_path, segments)
+
+        helper.main([
+            "relabel", "--session", str(session), "--speaker-id", "4",
+            "--name", "Domingo",
+        ])
+        out = json.loads(capsys.readouterr().out)
+
+        assert out["status"] == "applied"
+        assert out["mutated_files"] is True
+        assert out["merged_json_path"] == str((session / "transcript.json").resolve())
