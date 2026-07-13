@@ -26,6 +26,7 @@ import json
 import os
 import sys
 import wave
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -2728,3 +2729,272 @@ class TestRelabelAppliedEndToEnd:
         assert out["status"] == "applied"
         assert out["mutated_files"] is True
         assert out["merged_json_path"] == str((session / "transcript.json").resolve())
+
+
+# ===========================================================================
+# Task 09: speaker profile provenance metadata
+# ===========================================================================
+
+
+class TestBuildProfileProvenance:
+    """Task 09: the provenance payload matches the Swift
+    ``SpeakerProfileProvenance`` Codable shape exactly (camelCase keys) so
+    ``stt speaker enroll --provenance-json`` decodes it without translation."""
+
+    def test_produces_camelcase_keys_matching_swift_codable(self):
+        ts = datetime(2026, 7, 13, 10, 30, 0, tzinfo=timezone.utc)
+        payload = helper.build_profile_provenance(
+            session="/tmp/sess",
+            transcript_path="/tmp/sess/transcript.json",
+            source_track="system",
+            diarized_speaker_id="4",
+            selected_ranges=[(0.0, 5.0), (100.0, 105.0)],
+            timestamp=ts,
+        )
+        # camelCase keys mirroring SpeakerProfileProvenance.CodingKeys.
+        assert payload == {
+            "sourceSession": "/tmp/sess",
+            "sourceTranscript": "/tmp/sess/transcript.json",
+            "sourceTrack": "system",
+            "diarizedSpeakerId": "4",
+            "selectedRanges": [[0.0, 5.0], [100.0, 105.0]],
+            "confirmationMode": "range-limited",
+            "timestamp": "2026-07-13T10:30:00Z",
+        }
+
+    def test_omits_sample_path_so_swift_fills_canonical_path(self):
+        # samplePath is intentionally absent: the Swift enroll command sets it
+        # to the canonical stored-sample path it knows at enrollment time.
+        payload = helper.build_profile_provenance(
+            session="/tmp/sess",
+            transcript_path="/tmp/sess/transcript.json",
+            source_track="mic",
+            diarized_speaker_id="1",
+            selected_ranges=[(1.0, 2.0)],
+        )
+        assert "samplePath" not in payload
+
+    def test_timestamp_is_iso8601_z_suffix(self):
+        payload = helper.build_profile_provenance(
+            session="/tmp/sess",
+            transcript_path="/tmp/sess/transcript.json",
+            source_track="mic",
+            diarized_speaker_id="1",
+            selected_ranges=[(1.0, 2.0)],
+        )
+        # Must match the iso8601 format the profile store uses (seconds
+        # precision, Z suffix) so Swift's .iso8601 decoder accepts it.
+        ts = payload["timestamp"]
+        assert ts.endswith("Z")
+        # Parseable round-trip.
+        parsed = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")
+        assert parsed is not None
+
+    def test_is_deterministic_for_fixed_timestamp(self):
+        ts = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+        a = helper.build_profile_provenance(
+            session="s", transcript_path="t", source_track="mic",
+            diarized_speaker_id="1", selected_ranges=[(0.0, 1.0)], timestamp=ts,
+        )
+        b = helper.build_profile_provenance(
+            session="s", transcript_path="t", source_track="mic",
+            diarized_speaker_id="1", selected_ranges=[(0.0, 1.0)], timestamp=ts,
+        )
+        assert a == b
+
+
+class TestWriteProvenanceJson:
+    """Task 09: provenance JSON is written under ``<session>/.speaker-clips/``."""
+
+    def test_writes_file_in_clips_dir_and_returns_path(self, tmp_path):
+        session = tmp_path / "session"
+        session.mkdir()
+        payload = {"sourceSession": str(session), "confirmationMode": "range-limited"}
+        path = helper.write_provenance_json(session, "4", payload)
+        assert path == session / ".speaker-clips" / "speaker-4-enroll.provenance.json"
+        assert path.exists()
+        written = json.loads(path.read_text(encoding="utf-8"))
+        assert written == payload
+
+    def test_filename_is_deterministic_per_speaker(self, tmp_path):
+        # Re-writing for the same speaker overwrites (does not accumulate).
+        session = tmp_path / "session"
+        session.mkdir()
+        helper.write_provenance_json(session, "4", {"confirmationMode": "range-limited"})
+        path2 = helper.write_provenance_json(session, "4", {"confirmationMode": "range-limited", "x": 1})
+        files = sorted((session / ".speaker-clips").glob("*.json"))
+        assert len(files) == 1
+        assert json.loads(path2.read_text(encoding="utf-8"))["x"] == 1
+
+
+class TestEnrollProfileFromSampleProvenance:
+    """Task 09: ``enroll_profile_from_sample`` forwards ``--provenance-json``
+    to ``stt speaker enroll`` when given a provenance path, and omits it when
+    not (whole-audio enrollment). The subprocess is stubbed so no real Swift
+    command runs."""
+
+    def test_passes_provenance_json_when_path_given(self, monkeypatch):
+        captured: list[list[str]] = []
+
+        class _FakeProc:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def _fake_run(cmd, *a, **kw):
+            captured.append(cmd)
+            return _FakeProc()
+
+        monkeypatch.setattr(helper.subprocess, "run", _fake_run)
+        helper.enroll_profile_from_sample(
+            Path("/tmp/sample.wav"),
+            "Domingo",
+            Path("/tmp/profiles"),
+            Path("/tmp/backend"),
+            Path("/tmp/stt"),
+            provider="mfcc-test",
+            provenance_path=Path("/tmp/prov.json"),
+        )
+        assert captured
+        cmd = captured[0]
+        assert "--provenance-json" in cmd
+        idx = cmd.index("--provenance-json")
+        assert cmd[idx + 1] == "/tmp/prov.json"
+        # Still has the core enrollment args.
+        assert "speaker" in cmd and "enroll" in cmd
+        assert "--audio" in cmd and "/tmp/sample.wav" in cmd
+
+    def test_omits_provenance_json_when_no_path(self, monkeypatch):
+        captured: list[list[str]] = []
+
+        class _FakeProc:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def _fake_run(cmd, *a, **kw):
+            captured.append(cmd)
+            return _FakeProc()
+
+        monkeypatch.setattr(helper.subprocess, "run", _fake_run)
+        helper.enroll_profile_from_sample(
+            Path("/tmp/sample.wav"),
+            "Domingo",
+            Path("/tmp/profiles"),
+            Path("/tmp/backend"),
+            Path("/tmp/stt"),
+        )
+        assert captured
+        assert "--provenance-json" not in captured[0]
+
+
+class TestEnrollRangesProvenanceEndToEnd:
+    """Task 09: a successful ``enroll-ranges`` builds + writes a provenance
+    payload, forwards it to the enrollment command as ``--provenance-json``,
+    and echoes it in the result JSON. The enrollment subprocess is stubbed."""
+
+    def _make_session(self, tmp_path: Path, segments) -> Path:
+        session = tmp_path / "session"
+        session.mkdir()
+        last_end = max((s["end_time"] for s in segments), default=30.0)
+        _write_wav(session / "system.wav", _tone(last_end + 1.0))
+        _write_transcript(session / "transcript.json", segments)
+        return session
+
+    def _stub_enroll_capturing_cmd(self, monkeypatch):
+        captured: dict[str, Any] = {}
+
+        def _fake(sample_path, display_name, profiles_root, backend, stt_bin, **kw):
+            captured["kwargs"] = kw
+            captured["sample_path"] = str(sample_path)
+            return {
+                "command": ["stt", "speaker", "enroll", display_name],
+                "returncode": 0,
+                "stdout": "enrolled",
+                "stderr": "",
+                "enrolled": True,
+            }
+
+        monkeypatch.setattr(helper, "enroll_profile_from_sample", _fake)
+        return captured
+
+    def test_successful_enrollment_builds_and_forwards_provenance(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        # Arrange: empty profiles dir (no collision).
+        profiles_root = tmp_path / "speakers"
+        (profiles_root / "profiles").mkdir(parents=True)
+        monkeypatch.setenv("STT_SPEAKER_PROFILES_DIR", str(profiles_root))
+        captured = self._stub_enroll_capturing_cmd(monkeypatch)
+        segments = [_seg(4, 0.0, 10.0, "hi")]
+        session = self._make_session(tmp_path, segments)
+
+        # Act
+        helper.main([
+            "enroll-ranges",
+            "--session", str(session),
+            "--speaker-id", "4",
+            "--range", "1-8",
+            "--name", "Domingo",
+        ])
+        payload = json.loads(capsys.readouterr().out)
+
+        # Assert: enrollment was called with a provenance path.
+        assert payload["status"] == "enrolled"
+        assert captured["kwargs"].get("provenance_path") is not None
+        prov_path = Path(captured["kwargs"]["provenance_path"])
+        assert prov_path.exists()
+        # The provenance file was forwarded under .speaker-clips/.
+        assert ".speaker-clips" in str(prov_path)
+        assert prov_path.name == "speaker-4-enroll.provenance.json"
+
+        # The on-disk provenance has the Swift Codable shape (camelCase).
+        on_disk = json.loads(prov_path.read_text(encoding="utf-8"))
+        assert on_disk["sourceSession"] == str(session)
+        assert on_disk["sourceTranscript"] == str((session / "transcript.json").resolve())
+        assert on_disk["sourceTrack"] == "system"
+        assert on_disk["diarizedSpeakerId"] == "4"
+        assert on_disk["confirmationMode"] == "range-limited"
+        assert on_disk["selectedRanges"] == [[1.0, 8.0]]
+        # samplePath omitted -> Swift fills the canonical stored path.
+        assert "samplePath" not in on_disk
+        assert on_disk["timestamp"].endswith("Z")
+
+        # The result JSON echoes the provenance path + payload.
+        assert payload["provenance_path"] == str(prov_path)
+        assert payload["provenance"]["diarizedSpeakerId"] == "4"
+        assert payload["provenance"]["confirmationMode"] == "range-limited"
+        assert payload["provenance"]["selectedRanges"] == [[1.0, 8.0]]
+
+    def test_dry_run_does_not_build_or_forward_provenance(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        # Arrange: dry-run never reaches enrollment, so no provenance is built.
+        profiles_root = tmp_path / "speakers"
+        (profiles_root / "profiles").mkdir(parents=True)
+        monkeypatch.setenv("STT_SPEAKER_PROFILES_DIR", str(profiles_root))
+        called: list[bool] = []
+        monkeypatch.setattr(
+            helper,
+            "enroll_profile_from_sample",
+            lambda *a, **kw: called.append(True) or {"enrolled": True},
+        )
+        segments = [_seg(4, 0.0, 10.0, "hi")]
+        session = self._make_session(tmp_path, segments)
+
+        # Act
+        helper.main([
+            "enroll-ranges",
+            "--session", str(session),
+            "--speaker-id", "4",
+            "--range", "1-8",
+            "--name", "Domingo",
+            "--no-enroll",
+        ])
+        payload = json.loads(capsys.readouterr().out)
+
+        # Assert: dry-run writes no provenance file and never enrolls.
+        assert payload["status"] == "dry_run"
+        assert called == []
+        assert not (session / ".speaker-clips").exists()
+        assert "provenance_path" not in payload

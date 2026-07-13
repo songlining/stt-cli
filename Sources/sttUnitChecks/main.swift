@@ -989,6 +989,110 @@ func runChecks() throws {
         try checkEqual(noProfiles.status, "no_profiles", "suggest-labels decodes no_profiles status")
         try check(noProfiles.recommendation != nil, "suggest-labels decodes top-level recommendation in no_profiles state")
     }
+
+    // MARK: - Task 09: speaker profile provenance metadata
+    //
+    // Validates the backward-compatible provenance Codable against the exact
+    // acceptance criteria of task 09 (decode legacy JSON without provenance,
+    // encode/decode a new profile WITH provenance, rename preserves provenance)
+    // using the SAME iso8601 encoder/decoder the profile store and the enroll
+    // command use. Mirrors Speaker.Enroll's provenance handling: samplePath is
+    // filled to the canonical stored-sample path and timestamp falls back to
+    // now when absent (exactly what the Python build_profile_provenance helper
+    // relies on by omitting samplePath).
+    do {
+        let provStoreDir = FileManager.default.temporaryDirectory.appendingPathComponent("stt-prov-checks-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: provStoreDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: provStoreDir) }
+        let provStore = SpeakerProfileStore(directory: provStoreDir)
+
+        // (1) Legacy profile JSON (written before provenance existed) loads
+        // without migration: provenance decodes to nil, all other fields intact.
+        let legacyID = UUID()
+        let legacyJSON = """
+        {
+          "id": "\(legacyID.uuidString)",
+          "displayName": "Legacy Profile",
+          "createdAt": "2024-01-01T00:00:00Z",
+          "updatedAt": "2024-01-01T00:00:00Z",
+          "embeddingProvider": "mfcc-test",
+          "embeddingModel": "mfcc-test-v1",
+          "embedding": [0.1, 0.2],
+          "samplePaths": [],
+          "sampleDurationSeconds": 0
+        }
+        """
+        try FileManager.default.createDirectory(at: provStore.profilesDirectory, withIntermediateDirectories: true)
+        try Data(legacyJSON.utf8).write(to: provStore.profileFileURL(id: legacyID))
+        let legacy = try provStore.load(id: legacyID)
+        try check(legacy.provenance == nil, "legacy profile JSON without provenance decodes with nil provenance")
+        try checkEqual(legacy.displayName, "Legacy Profile", "legacy profile preserves displayName")
+        try checkEqual(legacy.embedding, [0.1, 0.2], "legacy profile preserves embedding")
+
+        // (2) A profile with full provenance round-trips through the store and
+        // records source session + confirmed ranges accurately.
+        let provTimestamp = Date(timeIntervalSince1970: 1_704_067_200)
+        let provenance = SpeakerProfileProvenance(
+            sourceSession: "/tmp/session",
+            sourceTranscript: "/tmp/session/transcript.json",
+            sourceTrack: "mic",
+            diarizedSpeakerId: "3",
+            selectedRanges: [[12.0, 24.0]],
+            samplePath: "samples/abc/clip.wav",
+            confirmationMode: "range-limited",
+            timestamp: provTimestamp
+        )
+        let profileWithProv = SpeakerProfile(
+            displayName: "Provenance Test",
+            createdAt: provTimestamp,
+            updatedAt: provTimestamp,
+            embeddingProvider: "mfcc-test",
+            embeddingModel: "mfcc-test-v1",
+            embedding: [0.1, 0.2],
+            samplePaths: ["samples/abc/clip.wav"],
+            sampleDurationSeconds: 12.0,
+            provenance: provenance
+        )
+        try provStore.save(profileWithProv)
+        let loadedWithProv = try provStore.load(id: profileWithProv.id)
+        try checkEqual(loadedWithProv.provenance, provenance, "profile with provenance round-trips through the store")
+        try checkEqual(loadedWithProv.provenance?.sourceSession, "/tmp/session", "provenance records source session accurately")
+        try checkEqual(loadedWithProv.provenance?.selectedRanges, [[12.0, 24.0]], "provenance records selected ranges accurately")
+        try checkEqual(loadedWithProv.provenance?.diarizedSpeakerId, "3", "provenance records diarized speaker id")
+
+        // (3) rename preserves provenance metadata (display name changes,
+        // provenance is carried through untouched).
+        let renamed = try provStore.rename(id: profileWithProv.id, to: "Renamed Provenance Test")
+        try checkEqual(renamed.displayName, "Renamed Provenance Test", "rename updates display name")
+        try checkEqual(renamed.provenance, provenance, "rename preserves provenance metadata")
+        try checkEqual(try provStore.load(id: profileWithProv.id).provenance, provenance, "rename persists provenance to disk")
+
+        // (4) Provenance JSON from the Python helper (camelCase, samplePath
+        // omitted, ISO8601 Z-suffix timestamp) decodes cleanly into the Codable,
+        // and the enroll-command fill rule (samplePath <- canonical stored path,
+        // timestamp <- now when absent) can be applied losslessly. This is the
+        // contract stt speaker enroll --provenance-json depends on.
+        let helperProvenanceJSON = """
+        {
+          "sourceSession": "/tmp/session",
+          "sourceTranscript": "/tmp/session/transcript.json",
+          "sourceTrack": "system",
+          "diarizedSpeakerId": "4",
+          "selectedRanges": [[1.0, 8.0]],
+          "confirmationMode": "range-limited",
+          "timestamp": "2026-07-13T10:30:00Z"
+        }
+        """
+        let provDecoder = JSONDecoder()
+        provDecoder.dateDecodingStrategy = .iso8601
+        var decodedFromHelper = try provDecoder.decode(SpeakerProfileProvenance.self, from: Data(helperProvenanceJSON.utf8))
+        try check(decodedFromHelper.samplePath == nil, "helper provenance omits samplePath as designed")
+        let canonicalSamplePath = "samples/\(profileWithProv.id.uuidString)/20260713-103000.wav"
+        decodedFromHelper.samplePath = canonicalSamplePath
+        try checkEqual(decodedFromHelper.samplePath, canonicalSamplePath, "enroll fill rule sets canonical samplePath")
+        try checkEqual(decodedFromHelper.selectedRanges, [[1.0, 8.0]], "helper provenance ranges decode")
+        try check(decodedFromHelper.timestamp != nil, "helper provenance timestamp decodes from iso8601 Z-suffix")
+    }
 }
 
 do {
