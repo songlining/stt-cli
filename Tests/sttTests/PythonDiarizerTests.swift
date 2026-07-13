@@ -80,6 +80,48 @@ struct PythonDiarizerTests {
         #expect(result.segments.map(\.speakerID) == ["0", "1", "2"])
     }
 
+    @Test func decodesNullSegmentFieldsAndWritesSpeakerIDsBack() throws {
+        let diarizationJSON = """
+        {
+            "provider": "mfcc-test",
+            "model": "mfcc-test",
+            "embeddingModel": "mfcc-test",
+            "numSpeakers": 2,
+            "distanceThreshold": null,
+            "segments": [
+                {"text": "hello", "start_time": 0.0, "end_time": 2.0, "speaker_id": "0"},
+                {"text": null, "start_time": null, "end_time": null, "duration": null, "speaker_id": "1"}
+            ],
+            "speakers": [
+                {"id": "0", "segmentCount": 1, "totalSpeechSeconds": 2.0},
+                {"id": "1", "segmentCount": 1, "totalSpeechSeconds": 0.0}
+            ]
+        }
+        """.data(using: .utf8)!
+        let result = try JSONDecoder().decode(DiarizationResult.self, from: diarizationJSON)
+        #expect(result.segments[1].text == nil)
+        #expect(result.segments[1].startTime == nil)
+        #expect(result.segments[1].endTime == nil)
+
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        let transcriptURL = tmpDir.appendingPathComponent("transcript.json")
+        try """
+        {"segments":[
+          {"text":"hello","start_time":0.0,"end_time":2.0},
+          {"text":null,"start_time":null,"end_time":null}
+        ]}
+        """.data(using: .utf8)!.write(to: transcriptURL)
+
+        try TranscriptMerger.applyDiarizationToFile(transcriptURL: transcriptURL, result: result)
+        let written = try JSONDecoder().decode(TranscriptJSON.self, from: Data(contentsOf: transcriptURL))
+        #expect(written.segments.map(\.speakerID) == ["0", "1"])
+        #expect(written.segments[1].text == "")
+        #expect(written.segments[1].startTime == 0.0)
+        #expect(written.segments[1].endTime == 0.0)
+    }
+
     // MARK: - Write-back by index (pure function)
 
     @Test func applyDiarizedSpeakerIDsSetsSpeakersInOrderAndPreservesFields() throws {

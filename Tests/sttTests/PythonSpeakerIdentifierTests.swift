@@ -593,6 +593,47 @@ struct PythonSpeakerIdentifierTests {
         #expect(result.recommendation != nil)
     }
 
+    @Test func suggestLabelsWritesBackendJSONToRequestedPath() throws {
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let audioURL = tmpDir.appendingPathComponent("sample.wav")
+        try writeTestWAV(to: audioURL, durationSeconds: 9.0)
+        let transcriptURL = tmpDir.appendingPathComponent("transcript.json")
+        let transcript: [String: Any] = [
+            "segments": [[
+                "text": "hello",
+                "start_time": 0.0,
+                "end_time": 9.0,
+                "speaker_id": "0",
+                "source": "mic"
+            ]]
+        ]
+        try JSONSerialization.data(withJSONObject: transcript).write(to: transcriptURL)
+        let outputURL = tmpDir.appendingPathComponent("suggestions.json")
+
+        let result = try PythonSpeakerIdentifier.suggestLabels(
+            transcript: transcriptURL.path,
+            audioSources: [(source: "mic", path: audioURL.path)],
+            profilesPath: nil,
+            provider: "mfcc-test",
+            threshold: 0.78,
+            margin: 0.05,
+            minimumSpeechSeconds: 8.0,
+            session: nil,
+            noWindows: true,
+            nWindows: 0,
+            jsonOutputPath: outputURL.path,
+            workingDirectory: Self.pythonBackendDirectory,
+            timeout: 15
+        )
+
+        #expect(FileManager.default.fileExists(atPath: outputURL.path))
+        let persisted = try JSONDecoder().decode(SpeakerSuggestionResult.self, from: Data(contentsOf: outputURL))
+        #expect(persisted == result)
+    }
+
     @Test func suggestionResultRoundTripsThroughEncodeDecode() throws {
         let original = SpeakerSuggestionResult(
             schemaVersion: 1,

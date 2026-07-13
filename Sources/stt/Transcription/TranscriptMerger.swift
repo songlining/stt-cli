@@ -83,9 +83,12 @@ public struct TranscriptSegment: Codable, Equatable {
     // String so downstream code (rendering, SpeakerLabelResolver) has one type.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        text = try c.decode(String.self, forKey: .text)
-        startTime = try c.decode(Double.self, forKey: .startTime)
-        endTime = try c.decode(Double.self, forKey: .endTime)
+        // diarize.py retains null/missing input fields for unclusterable
+        // segments. Keep this write-back boundary tolerant so a valid
+        // diarization result can still stamp its speaker_id onto every segment.
+        text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
+        startTime = try c.decodeIfPresent(Double.self, forKey: .startTime) ?? 0.0
+        endTime = try c.decodeIfPresent(Double.self, forKey: .endTime) ?? 0.0
         duration = try c.decodeIfPresent(Double.self, forKey: .duration)
         source = try c.decodeIfPresent(String.self, forKey: .source)
         if let string = try? c.decodeIfPresent(String.self, forKey: .speakerID) {

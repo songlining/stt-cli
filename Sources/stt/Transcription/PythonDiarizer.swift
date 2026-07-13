@@ -32,15 +32,17 @@ public struct DiarizationResult: Codable, Equatable {
 /// One diarised segment. Mirrors the diarize.py segment keys (text,
 /// start_time, end_time, duration, speaker_id as a string).
 public struct DiarizationSegment: Codable, Equatable {
-    public let text: String
-    public let startTime: Double
-    public let endTime: Double
+    /// diarize.py preserves null/missing input fields for unclusterable
+    /// segments while still assigning them a speaker id.
+    public let text: String?
+    public let startTime: Double?
+    public let endTime: Double?
     public let duration: Double?
     public let speakerID: String
 
-    public init(text: String,
-                startTime: Double,
-                endTime: Double,
+    public init(text: String?,
+                startTime: Double?,
+                endTime: Double?,
                 duration: Double?,
                 speakerID: String) {
         self.text = text

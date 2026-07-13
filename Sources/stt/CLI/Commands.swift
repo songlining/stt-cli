@@ -1492,6 +1492,15 @@ public struct Speaker: ParsableCommand {
         @Option(name: .long, help: "Path to the Python backend directory containing stt_vibevoice.")
         public var pythonBackend: String?
 
+        /// Optional JSON file describing the source of this enrollment sample
+        /// (used by ``enroll-ranges`` to record provenance: source session,
+        /// transcript, track, diarized speaker id, selected ranges, confirmation
+        /// mode, timestamp). When provided, the JSON is decoded into a
+        /// ``SpeakerProfileProvenance`` and attached to the created profile.
+        /// Omit for plain whole-audio enrollment (provenance stays unset).
+        @Option(name: .long, help: "Optional JSON file with sample provenance metadata (used by enroll-ranges).")
+        public var provenanceJSON: String?
+
         public init() {}
 
         public func run() throws {
@@ -1553,6 +1562,29 @@ public struct Speaker: ParsableCommand {
             let relativeSamplePath = "samples/\(profileID.uuidString)/\(sampleFileName)"
 
             let now = Date()
+            // Range-limited enrollment (enroll-ranges) passes a provenance JSON
+            // describing the source session/transcript/track/diarized speaker/
+            // confirmed ranges. Decode it (using the same iso8601 decoder as the
+            // profile store) and record the canonical stored sample path + a
+            // fallback timestamp so the provenance is always self-describing.
+            // Whole-audio enrollment passes no --provenance-json, so provenance
+            // stays nil and existing behavior is unchanged.
+            var provenance: SpeakerProfileProvenance? = nil
+            if let provenanceJSON {
+                let provenanceURL = try Paths.requireNonEmptyFile(provenanceJSON)
+                let data = try Data(contentsOf: provenanceURL)
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .iso8601
+                do {
+                    provenance = try decoder.decode(SpeakerProfileProvenance.self, from: data)
+                } catch {
+                    throw ValidationError("Could not parse provenance JSON at \(provenanceURL.path): \(error)")
+                }
+                provenance?.samplePath = relativeSamplePath
+                if provenance?.timestamp == nil {
+                    provenance?.timestamp = now
+                }
+            }
             let profile = SpeakerProfile(
                 id: profileID,
                 displayName: displayName,
@@ -1563,10 +1595,16 @@ public struct Speaker: ParsableCommand {
                 embedding: embedding,
                 samplePaths: replace ? [relativeSamplePath] : (existingProfile?.samplePaths ?? []) + [relativeSamplePath],
                 sampleDurationSeconds: extraction.durationSeconds,
-                notes: existingProfile?.notes
+                notes: existingProfile?.notes,
+                // A replacement without fresh provenance must not erase the
+                // audit trail from a prior range-limited enrollment.
+                provenance: provenance ?? existingProfile?.provenance
             )
             try store.save(profile)
 
+            if replace, provenance == nil, existingProfile?.provenance != nil {
+                print("note: keeping provenance from the previous enrollment (pass --provenance-json to replace it).")
+            }
             print("Enrolled speaker \"\(displayName)\" (id: \(profileID.uuidString)) using provider \(providerName).")
         }
     }

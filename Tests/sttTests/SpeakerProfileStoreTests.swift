@@ -51,6 +51,58 @@ struct SpeakerProfileStoreTests {
         #expect(FileManager.default.fileExists(atPath: expectedPath.path))
     }
 
+    @Test func profilesRoundTripProvenanceAndLoadLegacyJSONWithoutIt() throws {
+        let dir = tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = SpeakerProfileStore(directory: dir)
+        let timestamp = Date(timeIntervalSince1970: 1_704_067_200)
+        let provenance = SpeakerProfileProvenance(
+            sourceSession: "/tmp/session",
+            sourceTranscript: "/tmp/session/diarized.json",
+            sourceTrack: "mic",
+            diarizedSpeakerId: "3",
+            selectedRanges: [[12.0, 24.0]],
+            samplePath: "samples/sample-id/clip.wav",
+            confirmationMode: "range-limited",
+            timestamp: timestamp
+        )
+        let profile = SpeakerProfile(
+            displayName: "Provenance Test",
+            createdAt: timestamp,
+            updatedAt: timestamp,
+            embeddingProvider: "mfcc-test",
+            embeddingModel: "mfcc-test-v1",
+            embedding: [0.1, 0.2],
+            samplePaths: ["samples/sample-id/clip.wav"],
+            sampleDurationSeconds: 12.0,
+            provenance: provenance
+        )
+        try store.save(profile)
+        #expect(try store.load(id: profile.id).provenance == provenance)
+
+        let renamed = try store.rename(id: profile.id, to: "Renamed Provenance Test")
+        #expect(renamed.provenance == provenance)
+        #expect(try store.load(id: profile.id).provenance == provenance)
+
+        let legacyID = UUID()
+        try FileManager.default.createDirectory(at: store.profilesDirectory, withIntermediateDirectories: true)
+        let legacyJSON = """
+        {
+          "id": "\(legacyID.uuidString)",
+          "displayName": "Legacy Profile",
+          "createdAt": "2024-01-01T00:00:00Z",
+          "updatedAt": "2024-01-01T00:00:00Z",
+          "embeddingProvider": "mfcc-test",
+          "embeddingModel": "mfcc-test-v1",
+          "embedding": [0.1, 0.2],
+          "samplePaths": [],
+          "sampleDurationSeconds": 0
+        }
+        """
+        try legacyJSON.data(using: .utf8)!.write(to: store.profileFileURL(id: legacyID))
+        #expect(try store.load(id: legacyID).provenance == nil)
+    }
+
     // MARK: - Index consistency
 
     @Test func indexReflectsSavedProfiles() throws {

@@ -1,5 +1,77 @@
 import Foundation
 
+/// Backward-compatible provenance metadata for an enrolled speaker sample.
+///
+/// Records *how* a profile's enrollment sample was produced so the profile
+/// can be traced back to its source session, transcript, diarized speaker,
+/// and the confirmed time ranges it was enrolled from. Every field is
+/// optional so that:
+///
+/// - Pre-existing profile JSON (written before provenance existed) decodes
+///   with a ``nil`` ``provenance`` block -- no migration required.
+/// - Range-limited enrollment (``enroll-ranges``) populates the fields it
+///   knows (source session/transcript/track, diarized speaker id, selected
+///   ranges, confirmation mode, timestamp); whole-audio enrollment simply
+///   leaves ``provenance`` unset.
+///
+/// Speaker profiles are local biometric-like data; provenance is stored
+/// locally alongside the profile and is never uploaded.
+public struct SpeakerProfileProvenance: Codable, Equatable, Sendable {
+    /// Path of the recording session directory the sample was enrolled from
+    /// (e.g. the session containing ``mic.wav``/``system.wav`` and the
+    /// transcript). ``nil`` for whole-audio enrollment with no session.
+    public var sourceSession: String?
+    /// Path of the diarized transcript JSON the sample was sourced from.
+    public var sourceTranscript: String?
+    /// Audio source track the sample was taken from (``"mic"`` or
+    /// ``"system"``).
+    public var sourceTrack: String?
+    /// Diarized speaker id (cluster label) the enrolled ranges belonged to.
+    public var diarizedSpeakerId: String?
+    /// Confirmed ``(start, end)`` time ranges (seconds) the sample was built
+    /// from, as ``[[start, end], ...]``.
+    public var selectedRanges: [[Double]]?
+    /// Relative path (under ``speakerProfilesDir``) of the enrolled sample
+    /// WAV, e.g. ``samples/<id>/20260706-120000.wav``. Mirrors the entry
+    /// appended to ``SpeakerProfile.samplePaths`` for this enrollment.
+    public var samplePath: String?
+    /// How the enrollment was confirmed/sourced. ``"range-limited"`` for
+    /// ``enroll-ranges`` (confirmed ranges); whole-audio enrollment leaves
+    /// this unset.
+    public var confirmationMode: String?
+    /// When the provenance was recorded (profile/sample creation time).
+    public var timestamp: Date?
+
+    public init(sourceSession: String? = nil,
+                sourceTranscript: String? = nil,
+                sourceTrack: String? = nil,
+                diarizedSpeakerId: String? = nil,
+                selectedRanges: [[Double]]? = nil,
+                samplePath: String? = nil,
+                confirmationMode: String? = nil,
+                timestamp: Date? = nil) {
+        self.sourceSession = sourceSession
+        self.sourceTranscript = sourceTranscript
+        self.sourceTrack = sourceTrack
+        self.diarizedSpeakerId = diarizedSpeakerId
+        self.selectedRanges = selectedRanges
+        self.samplePath = samplePath
+        self.confirmationMode = confirmationMode
+        self.timestamp = timestamp
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case sourceSession
+        case sourceTranscript
+        case sourceTrack
+        case diarizedSpeakerId
+        case selectedRanges
+        case samplePath
+        case confirmationMode
+        case timestamp
+    }
+}
+
 /// A single enrolled speaker profile.
 ///
 /// Stored as one JSON file per profile under
@@ -21,6 +93,11 @@ public struct SpeakerProfile: Codable, Equatable, Sendable {
     public var samplePaths: [String]
     public var sampleDurationSeconds: Double
     public var notes: String?
+    /// Backward-compatible provenance metadata for the enrollment sample.
+    /// ``nil`` for profiles enrolled before provenance existed and for
+    /// whole-audio enrollment that has no source session/ranges to record.
+    /// Optional so existing profile JSON loads without migration.
+    public var provenance: SpeakerProfileProvenance?
 
     public init(id: UUID = UUID(),
                 displayName: String,
@@ -31,7 +108,8 @@ public struct SpeakerProfile: Codable, Equatable, Sendable {
                 embedding: [Double],
                 samplePaths: [String] = [],
                 sampleDurationSeconds: Double = 0,
-                notes: String? = nil) {
+                notes: String? = nil,
+                provenance: SpeakerProfileProvenance? = nil) {
         self.id = id
         self.displayName = displayName
         self.createdAt = createdAt
@@ -42,6 +120,7 @@ public struct SpeakerProfile: Codable, Equatable, Sendable {
         self.samplePaths = samplePaths
         self.sampleDurationSeconds = sampleDurationSeconds
         self.notes = notes
+        self.provenance = provenance
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -55,6 +134,7 @@ public struct SpeakerProfile: Codable, Equatable, Sendable {
         case samplePaths
         case sampleDurationSeconds
         case notes
+        case provenance
     }
 }
 

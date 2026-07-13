@@ -417,14 +417,13 @@ public enum PythonSpeakerIdentifier {
         return arguments
     }
 
-    /// Runs `python -m stt_vibevoice.speaker_id suggest-labels` and returns
-    /// the raw JSON output as `Data`. The caller (CLI command) decides how to
-    /// present it. This is a non-mutating read-only operation: it never writes
-    /// to the transcript or profile files.
+    /// Runs `python -m stt_vibevoice.speaker_id suggest-labels`, decodes its
+    /// JSON result, and optionally persists the backend's schema-versioned JSON
+    /// at `jsonOutputPath`. This never mutates the transcript or profile files.
     ///
     /// When `profilesPath` is nil, an empty profile list is used (the
-    /// `no_profiles` state). When `jsonOutputPath` is nil, the result is
-    /// captured from stdout.
+    /// `no_profiles` state). When `jsonOutputPath` is nil, a temporary output
+    /// file is used and removed after decoding.
     public static func suggestLabels(transcript: String,
                                      audioSources: [(source: String, path: String)],
                                      profilesPath: String?,
@@ -442,8 +441,31 @@ public enum PythonSpeakerIdentifier {
             throw PythonSpeakerIdentifierError.python3NotFound
         }
 
-        let jsonOutputURL = temporaryJSONURL(prefix: "stt-speaker-suggest-")
-        defer { try? FileManager.default.removeItem(at: jsonOutputURL) }
+        let jsonOutputURL: URL
+        let isTemporaryOutput: Bool
+        if let jsonOutputPath {
+            // ProcessRunner executes Python from `workingDirectory` (normally
+            // `python/`), but a CLI-relative --json path must resolve from the
+            // user's current directory, not from that backend directory.
+            let currentDirectory = URL(
+                fileURLWithPath: FileManager.default.currentDirectoryPath,
+                isDirectory: true
+            )
+            jsonOutputURL = URL(fileURLWithPath: jsonOutputPath, relativeTo: currentDirectory)
+                .standardizedFileURL
+            // Avoid accepting stale output from a previous invocation if the
+            // backend exits unsuccessfully or fails to write its result.
+            try? FileManager.default.removeItem(at: jsonOutputURL)
+            isTemporaryOutput = false
+        } else {
+            jsonOutputURL = temporaryJSONURL(prefix: "stt-speaker-suggest-")
+            isTemporaryOutput = true
+        }
+        defer {
+            if isTemporaryOutput {
+                try? FileManager.default.removeItem(at: jsonOutputURL)
+            }
+        }
 
         let arguments = buildSuggestLabelsArguments(
             transcript: transcript,
@@ -471,7 +493,7 @@ public enum PythonSpeakerIdentifier {
             throw PythonSpeakerIdentifierError.timedOut(seconds: timeout ?? 0)
         }
 
-        guard FileManager.default.fileExists(atPath: jsonOutputURL.path) else {
+        guard result.succeeded, FileManager.default.fileExists(atPath: jsonOutputURL.path) else {
             throw PythonSpeakerIdentifierError.processFailed(exitCode: result.exitCode, stderr: result.standardError)
         }
 
