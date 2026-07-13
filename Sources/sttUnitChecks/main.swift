@@ -794,6 +794,201 @@ func runChecks() throws {
         try store.delete(id: profile.id)
         try checkEqual(try store.listSummaries().count, 0, "speaker profile store delete removes profile")
     }
+
+    // MARK: - Task 08: stt speaker audit / purity-preview / enroll-ranges / suggest-labels
+
+    do {
+        let audit = try Speaker.Audit.parse([
+            "--transcript", "/tmp/session/transcript.json",
+            "--force", "--min-useful-speech", "5.0", "--mixed-span-ratio", "3.0"
+        ])
+        try checkEqual(audit.transcript, "/tmp/session/transcript.json", "speaker audit transcript parses")
+        try check(audit.force, "speaker audit --force parses")
+        try checkEqual(audit.minUsefulSpeech, 5.0, "speaker audit min-useful-speech parses")
+
+        let preview = try Speaker.PurityPreview.parse([
+            "--transcript", "/tmp/session/transcript.json", "--speaker-id", "4",
+            "--range", "12.0-45.0", "--range", "100.0-120.0", "--no-play"
+        ])
+        try checkEqual(preview.speakerId, "4", "speaker purity-preview speaker-id parses")
+        try checkEqual(preview.range, ["12.0-45.0", "100.0-120.0"], "speaker purity-preview repeated ranges parse")
+        try check(preview.noPlay, "speaker purity-preview --no-play parses")
+
+        let enrollRanges = try Speaker.EnrollRanges.parse([
+            "Domingo", "--transcript", "/tmp/session/transcript.json", "--speaker-id", "4",
+            "--range", "12.0-45.0", "--no-enroll"
+        ])
+        try checkEqual(enrollRanges.displayName, "Domingo", "speaker enroll-ranges display name parses")
+        try checkEqual(enrollRanges.range, ["12.0-45.0"], "speaker enroll-ranges range parses")
+        try check(enrollRanges.noEnroll, "speaker enroll-ranges --no-enroll parses")
+
+        let noRanges = try Speaker.EnrollRanges.parse([
+            "Domingo", "--transcript", "/tmp/session/transcript.json", "--speaker-id", "4"
+        ])
+        do {
+            try noRanges.run()
+            throw CheckFailure(message: "enroll-ranges without --range should throw")
+        } catch is ValidationError {
+            // expected
+        }
+
+        let suggest = try Speaker.SuggestLabels.parse([
+            "--transcript", "/tmp/session/transcript.json", "--threshold", "0.8", "--no-windows"
+        ])
+        try checkEqual(suggest.threshold, 0.8, "speaker suggest-labels threshold parses")
+        try check(suggest.noWindows, "speaker suggest-labels --no-windows parses")
+
+        let auditRoute = try STT.parseAsRoot(["speaker", "audit", "--transcript", "/tmp/session/transcript.json"])
+        try check(auditRoute is Speaker.Audit, "top-level routing reaches speaker audit")
+    }
+
+    // MARK: - Task 08: range-aware / suggest-labels argument builders (pure, no subprocess)
+
+    do {
+        let extractRanges = PythonSpeakerIdentifier.buildExtractArguments(
+            audioPath: "sample.wav", segmentsJSONPath: "transcript.json", speakerID: "4",
+            provider: "mfcc-test", minimumSpeechSeconds: 8.0, ranges: ["2.0-12.0", "30.0-40.0"]
+        )
+        try checkEqual(extractRanges, [
+            "-m", "stt_vibevoice.speaker_id", "extract", "--audio", "sample.wav",
+            "--segments", "transcript.json", "--speaker-id", "4",
+            "--provider", "mfcc-test", "--minimum-speech-seconds", "8.0",
+            "--range", "2.0-12.0", "--range", "30.0-40.0"
+        ], "buildExtractArguments includes repeated --range flags")
+
+        let concatArgs = PythonSpeakerIdentifier.buildConcatenateArguments(
+            audioPath: "sample.wav", segmentsJSONPath: "transcript.json", speakerID: "4",
+            outPath: "out.wav", jsonOutputPath: "out.json",
+            ranges: ["2.0-12.0"], bestSegments: false
+        )
+        try check(concatArgs.contains("--no-best-segments"), "buildConcatenateArguments respects bestSegments=false")
+        try check(concatArgs.contains("--range"), "buildConcatenateArguments includes --range")
+
+        let suggestArgs = PythonSpeakerIdentifier.buildSuggestLabelsArguments(
+            transcript: "transcript.json",
+            audioSources: [(source: "mic", path: "mic.wav"), (source: "system", path: "system.wav")],
+            profilesPath: "profiles.json", provider: "mfcc-test", threshold: 0.78, margin: 0.05,
+            minimumSpeechSeconds: 8.0, session: "/tmp/session", noWindows: false, nWindows: 2,
+            jsonOutputPath: "out.json"
+        )
+        try checkEqual(suggestArgs, [
+            "-m", "stt_vibevoice.speaker_id", "suggest-labels",
+            "--transcript", "transcript.json",
+            "--audio", "mic=mic.wav", "--audio", "system=system.wav",
+            "--profiles", "profiles.json",
+            "--provider", "mfcc-test", "--threshold", "0.78", "--margin", "0.05",
+            "--minimum-speech-seconds", "8.0", "--session", "/tmp/session",
+            "--n-windows", "2", "--json", "out.json"
+        ], "buildSuggestLabelsArguments produces expected argument list")
+
+        let noWindowsArgs = PythonSpeakerIdentifier.buildSuggestLabelsArguments(
+            transcript: "transcript.json", audioSources: [], profilesPath: nil, provider: "mfcc-test",
+            threshold: 0.78, margin: 0.05, minimumSpeechSeconds: 8.0, session: nil,
+            noWindows: true, nWindows: 2, jsonOutputPath: nil
+        )
+        try check(noWindowsArgs.contains("--no-windows"), "suggest-labels args use --no-windows flag")
+        try check(!noWindowsArgs.contains("--n-windows"), "suggest-labels args omit --n-windows when --no-windows")
+
+        let defaultDir = PythonSpeakerIdentifier.defaultHelperScriptsDirectory(environment: ["STT_HELPER_SCRIPTS": "/custom/scripts"])
+        try checkEqual(defaultDir, "/custom/scripts", "defaultHelperScriptsDirectory prefers env override")
+
+        let fallbackDir = PythonSpeakerIdentifier.defaultHelperScriptsDirectory(environment: [:])
+        try check(fallbackDir?.hasSuffix("/.pi/agent/skills/stt-meeting-recordings/scripts") == true, "defaultHelperScriptsDirectory falls back to known default")
+
+        let missingScript = PythonSpeakerIdentifier.resolveHelperScriptPath(
+            explicitOverride: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path,
+            environment: [:], fileManager: .default
+        )
+        try check(missingScript == nil, "resolveHelperScriptPath returns nil when script missing")
+
+        let helperArgs = PythonSpeakerIdentifier.buildHelperScriptArguments(
+            subcommand: "enroll-ranges", scriptPath: "/scripts/name_one_speaker.py",
+            rangeArguments: ["2.0-12.0"],
+            keywordArguments: [(flag: "--session", value: "/tmp/session"), (flag: "--no-enroll", value: nil)]
+        )
+        try checkEqual(helperArgs, [
+            "/scripts/name_one_speaker.py", "enroll-ranges",
+            "--range", "2.0-12.0", "--session", "/tmp/session", "--no-enroll"
+        ], "buildHelperScriptArguments interleaves ranges then keyword args")
+    }
+
+    // MARK: - Task 08: suggest-labels result decoding against the REAL backend schema
+    //
+    // This is a regression guard: an earlier version of SpeakerSuggestionResult
+    // used made-up snake_case CodingKeys and a wrong shape (flat fields instead
+    // of nested config/profilesConsidered/duplicateClusterGroups/mixedClusterWarnings,
+    // and `summary` typed as String instead of an object). That mismatch would
+    // have made `stt speaker suggest-labels` throw invalidJSONOutput on every
+    // real backend response. This fixture mirrors build_label_suggestions's
+    // actual output (speaker_id.py) exactly.
+
+    do {
+        let json = """
+        {
+          "schemaVersion": 1,
+          "status": "ok",
+          "session": "/tmp/session",
+          "generatedAt": "2026-07-13T00:00:00Z",
+          "config": {"threshold": 0.78, "margin": 0.05, "provider": "mfcc-test", "model": "mfcc-test-v1"},
+          "profilesConsidered": {"count": 1, "profileIds": ["p1"]},
+          "clusters": [
+            {
+              "speakerId": "1", "source": "system", "durationSeconds": 12.0, "segmentCount": 2,
+              "selectedRanges": [[0.0, 5.0], [10.0, 15.0]], "speechSeconds": 10.0,
+              "bestMatch": {"profileId": "p1", "displayName": "Domingo", "confidence": 0.91, "margin": 0.2, "matched": true, "status": "matched"},
+              "recommendation": "reuse_profile", "recommendationDetail": "matches Domingo"
+            }
+          ],
+          "duplicateClusterGroups": [
+            {
+              "profileId": "p1", "nameHint": "Domingo", "displayName": "Domingo",
+              "clusters": [{"speakerId": "1", "confidence": 0.91, "selectedRanges": [[0.0, 5.0]]}],
+              "recommendation": "merge_or_relabel", "recommendationDetail": "dup"
+            }
+          ],
+          "mixedClusterWarnings": [
+            {
+              "speakerId": "4",
+              "windows": [
+                {"label": "early", "range": [0.0, 12.0], "bestMatch": {"profileId": "p1", "displayName": "Domingo", "confidence": 0.9, "margin": 0.2, "matched": true, "status": "matched"}, "matchedProfileId": "p1"},
+                {"label": "late", "range": [200.0, 212.0], "bestMatch": {"profileId": "p2", "displayName": "Gia", "confidence": 0.85, "margin": 0.18, "matched": true, "status": "matched"}, "matchedProfileId": "p2"}
+              ],
+              "conflictingProfileIds": ["p1", "p2"], "conflictingDisplayNames": ["Domingo", "Gia"],
+              "recommendation": "do_not_enroll_whole_cluster", "recommendationDetail": "mixed"
+            }
+          ],
+          "summary": {"clusterCount": 3, "matchedCount": 2, "duplicateGroupCount": 1, "mixedClusterCount": 1, "unmatchedCount": 1}
+        }
+        """
+        let decoded = try JSONDecoder().decode(SpeakerSuggestionResult.self, from: Data(json.utf8))
+        try checkEqual(decoded.schemaVersion, 1, "suggest-labels decodes schemaVersion")
+        try checkEqual(decoded.status, "ok", "suggest-labels decodes status")
+        try checkEqual(decoded.config?.threshold, 0.78, "suggest-labels decodes nested config.threshold")
+        try checkEqual(decoded.profilesConsidered?.count, 1, "suggest-labels decodes profilesConsidered.count")
+        try checkEqual(decoded.clusters?.first?.bestMatch?.displayName, "Domingo", "suggest-labels decodes cluster bestMatch (camelCase, reused SpeakerMatchBestMatch)")
+        try checkEqual(decoded.clusters?.first?.selectedRanges, [[0.0, 5.0], [10.0, 15.0]], "suggest-labels decodes selectedRanges as [[Double]]")
+        try checkEqual(decoded.duplicateClusterGroups?.first?.profileId, "p1", "suggest-labels decodes duplicateClusterGroups")
+        try checkEqual(decoded.mixedClusterWarnings?.first?.conflictingDisplayNames, ["Domingo", "Gia"], "suggest-labels decodes mixedClusterWarnings")
+        try checkEqual(decoded.mixedClusterWarnings?.first?.windows?.count, 2, "suggest-labels decodes per-window evidence")
+        try checkEqual(decoded.summary?.duplicateGroupCount, 1, "suggest-labels decodes summary as an object, not a String")
+
+        // Round trip: re-encode and decode again (this is what the CLI does
+        // when it prints the result back out).
+        let reencoded = try JSONEncoder().encode(decoded)
+        let redecoded = try JSONDecoder().decode(SpeakerSuggestionResult.self, from: reencoded)
+        try checkEqual(redecoded, decoded, "suggest-labels result round-trips through encode/decode")
+
+        // no_profiles state
+        let noProfilesJSON = """
+        {"schemaVersion": 1, "status": "no_profiles", "clusters": [], "duplicateClusterGroups": [],
+         "mixedClusterWarnings": [], "profilesConsidered": {"count": 0, "profileIds": []},
+         "summary": {"clusterCount": 2, "matchedCount": 0, "duplicateGroupCount": 0, "mixedClusterCount": 0, "unmatchedCount": 2},
+         "recommendation": "No speaker profiles are enrolled yet."}
+        """
+        let noProfiles = try JSONDecoder().decode(SpeakerSuggestionResult.self, from: Data(noProfilesJSON.utf8))
+        try checkEqual(noProfiles.status, "no_profiles", "suggest-labels decodes no_profiles status")
+        try check(noProfiles.recommendation != nil, "suggest-labels decodes top-level recommendation in no_profiles state")
+    }
 }
 
 do {

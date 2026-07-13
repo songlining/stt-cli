@@ -433,4 +433,125 @@ struct CLIParsingTests {
         let command = try STT.parseAsRoot(["identify", "/tmp/clip.wav"])
         #expect(command is Identify)
     }
+
+    // MARK: - Task 08: stt speaker audit / purity-preview / enroll-ranges / suggest-labels
+
+    @Test func speakerAuditParsesRequiredAndOptionalFlags() throws {
+        let audit = try Speaker.Audit.parse([
+            "--transcript", "/tmp/session/transcript.json",
+            "--force",
+            "--min-useful-speech", "5.0",
+            "--mixed-span-ratio", "3.0",
+            "--json", "/tmp/out.json"
+        ])
+        #expect(audit.transcript == "/tmp/session/transcript.json")
+        #expect(audit.force)
+        #expect(audit.minUsefulSpeech == 5.0)
+        #expect(audit.mixedSpanRatio == 3.0)
+        #expect(audit.json == "/tmp/out.json")
+    }
+
+    @Test func speakerAuditDefaultsForceToFalse() throws {
+        let audit = try Speaker.Audit.parse(["--transcript", "/tmp/session/transcript.json"])
+        #expect(!audit.force)
+        #expect(audit.minUsefulSpeech == nil)
+    }
+
+    @Test func speakerPurityPreviewParsesSpeakerIdAndRepeatedRanges() throws {
+        let preview = try Speaker.PurityPreview.parse([
+            "--transcript", "/tmp/session/transcript.json",
+            "--speaker-id", "4",
+            "--range", "12.0-45.0",
+            "--range", "100.0-120.0",
+            "--preview-seconds", "12",
+            "--no-play",
+            "--no-normalize"
+        ])
+        #expect(preview.speakerId == "4")
+        #expect(preview.range == ["12.0-45.0", "100.0-120.0"])
+        #expect(preview.previewSeconds == 12)
+        #expect(preview.noPlay)
+        #expect(preview.noNormalize)
+    }
+
+    @Test func speakerPurityPreviewDefaultsRangeToEmpty() throws {
+        let preview = try Speaker.PurityPreview.parse([
+            "--transcript", "/tmp/session/transcript.json",
+            "--speaker-id", "4"
+        ])
+        #expect(preview.range.isEmpty)
+        #expect(!preview.noPlay)
+        #expect(!preview.noNormalize)
+    }
+
+    @Test func speakerEnrollRangesParsesDisplayNameRangesAndFlags() throws {
+        let enrollRanges = try Speaker.EnrollRanges.parse([
+            "Domingo",
+            "--transcript", "/tmp/session/transcript.json",
+            "--speaker-id", "4",
+            "--range", "12.0-45.0",
+            "--source", "system",
+            "--sample-seconds", "60",
+            "--no-enroll"
+        ])
+        #expect(enrollRanges.displayName == "Domingo")
+        #expect(enrollRanges.speakerId == "4")
+        #expect(enrollRanges.range == ["12.0-45.0"])
+        #expect(enrollRanges.source == "system")
+        #expect(enrollRanges.sampleSeconds == 60)
+        #expect(enrollRanges.noEnroll)
+    }
+
+    @Test func speakerEnrollRangesRequiresAtLeastOneRangeAtRunTime() throws {
+        // Parsing succeeds (range defaults to []); the explicit "at least one
+        // range" requirement is enforced in run(), not by ArgumentParser.
+        let enrollRanges = try Speaker.EnrollRanges.parse([
+            "Domingo",
+            "--transcript", "/tmp/session/transcript.json",
+            "--speaker-id", "4"
+        ])
+        #expect(enrollRanges.range.isEmpty)
+        #expect(throws: (any Error).self) {
+            try enrollRanges.run()
+        }
+    }
+
+    @Test func speakerSuggestLabelsParsesThresholdMarginAndWindowOptions() throws {
+        let suggest = try Speaker.SuggestLabels.parse([
+            "--transcript", "/tmp/session/transcript.json",
+            "--threshold", "0.8",
+            "--margin", "0.1",
+            "--provider", "mfcc-test",
+            "--no-windows",
+            "--json", "/tmp/suggestions.json"
+        ])
+        #expect(suggest.transcript == "/tmp/session/transcript.json")
+        #expect(suggest.threshold == 0.8)
+        #expect(suggest.margin == 0.1)
+        #expect(suggest.provider == "mfcc-test")
+        #expect(suggest.noWindows)
+        #expect(suggest.json == "/tmp/suggestions.json")
+    }
+
+    @Test func speakerSuggestLabelsDefaultsAreNilOrFalse() throws {
+        let suggest = try Speaker.SuggestLabels.parse(["--transcript", "/tmp/session/transcript.json"])
+        #expect(suggest.threshold == nil)
+        #expect(suggest.margin == nil)
+        #expect(!suggest.noWindows)
+        #expect(suggest.nWindows == nil)
+    }
+
+    @Test func topLevelCommandRoutesToSpeakerAuditSubcommand() throws {
+        let command = try STT.parseAsRoot([
+            "speaker", "audit", "--transcript", "/tmp/session/transcript.json"
+        ])
+        #expect(command is Speaker.Audit)
+    }
+
+    @Test func topLevelCommandRoutesToSpeakerSuggestLabelsSubcommand() throws {
+        let command = try STT.parseAsRoot([
+            "speaker", "suggest-labels", "--transcript", "/tmp/session/transcript.json"
+        ])
+        #expect(command is Speaker.SuggestLabels)
+    }
 }

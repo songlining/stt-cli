@@ -1413,12 +1413,51 @@ public enum SpeakerCLISupport {
     }
 }
 
+// MARK: - speaker session enrichment
+
+/// Helpers for the ``Speaker.Audit`` / ``Speaker.PurityPreview`` /
+/// ``Speaker.EnrollRanges`` commands, which bridge to the
+/// ``name_one_speaker.py`` helper script. The helper script expects a
+/// *session directory* containing ``transcript.json``, ``mic.wav``, and
+/// ``system.wav``. These helpers ensure the session directory is set up
+/// correctly when the CLI is given explicit ``--mic`` / ``--system`` paths
+/// that may live elsewhere.
+public enum SpeakerAuditEnrichment {
+    /// Ensures the session directory contains ``mic.wav`` and/or ``system.wav``.
+    /// If an explicit ``--mic`` / ``--system`` path is provided and it is NOT
+    /// already inside the session directory, a symlink is created inside the
+    /// session directory so the helper script can find it.
+    ///
+    /// This is non-destructive: existing ``mic.wav`` / ``system.wav`` files in
+    /// the session directory are never overwritten.
+    static func ensureSessionContainsSourceWAVs(sessionDir: URL, micPath: String?, systemPath: String?) throws {
+        if let micPath {
+            let micURL = URL(fileURLWithPath: micPath)
+            try ensureSourceWAV(in: sessionDir, name: "mic.wav", sourceURL: micURL)
+        }
+        if let systemPath {
+            let systemURL = URL(fileURLWithPath: systemPath)
+            try ensureSourceWAV(in: sessionDir, name: "system.wav", sourceURL: systemURL)
+        }
+    }
+
+    private static func ensureSourceWAV(in sessionDir: URL, name: String, sourceURL: URL) throws {
+        let targetURL = sessionDir.appendingPathComponent(name)
+        if FileManager.default.fileExists(atPath: targetURL.path) {
+            return // already present
+        }
+        _ = try Paths.requireNonEmptyFile(sourceURL.path)
+        // Create a symlink so the helper script finds the expected file name.
+        try FileManager.default.createSymbolicLink(atPath: targetURL.path, withDestinationPath: sourceURL.path)
+    }
+}
+
 // MARK: - stt speaker
 
 public struct Speaker: ParsableCommand {
     public static let configuration = CommandConfiguration(
         abstract: "Manage local speaker enrollment profiles (stored locally; see privacy notes in README).",
-        subcommands: [Enroll.self, ListProfiles.self, Rename.self, Remove.self]
+        subcommands: [Enroll.self, ListProfiles.self, Rename.self, Remove.self, Audit.self, PurityPreview.self, EnrollRanges.self, SuggestLabels.self]
     )
 
     public init() {}
@@ -1615,6 +1654,375 @@ public struct Speaker: ParsableCommand {
             let profile = try store.findByName(displayName)
             try store.delete(id: profile.id)
             print("Removed speaker \"\(displayName)\" (id: \(profile.id.uuidString)) and its stored samples.")
+        }
+    }
+
+    // MARK: - stt speaker audit
+
+    /// Summarizes every speaker cluster in a diarized transcript and flags
+    /// possible mixed clusters before enrollment. Read-only except for the
+    /// ``speaker_audit.json`` artifact written to the session directory.
+    ///
+    /// The audit classifies each speaker as ``unknown``, ``pure_likely``, or
+    /// ``mixed_suspected`` based on useful-speech seconds and the time-span to
+    /// speech ratio. A cluster marked ``mixed_suspected`` should be enrolled
+    /// via ``enroll-ranges`` (confirmed ranges) rather than whole-cluster
+    /// ``enroll``.
+    public struct Audit: ParsableCommand {
+        public static let configuration = CommandConfiguration(abstract: "Audit speaker clusters for enrollment safety (read-only).")
+
+        @Option(name: .long, help: "Path to the diarized transcript JSON (parent directory is used as the session).")
+        public var transcript: String
+
+        @Option(name: .long, help: "Path to the mic-track source WAV (should be in the session directory as mic.wav).")
+        public var mic: String?
+
+        @Option(name: .long, help: "Path to the system-track source WAV (should be in the session directory as system.wav).")
+        public var system: String?
+
+        @Option(name: .long, help: "Python backend directory for the diarisation/embedding step (runtime/ venv).")
+        public var pythonBackend: String?
+
+        @Option(name: .long, help: "Override the path to the helper scripts directory (containing name_one_speaker.py).")
+        public var helperScript: String?
+
+        @Flag(name: .long, help: "Recompute the audit even if speaker_audit.json already exists.")
+        public var force: Bool = false
+
+        @Option(name: .long, help: "Clusters with less than this many seconds of useful speech are 'unknown' (default 5.0).")
+        public var minUsefulSpeech: Double?
+
+        @Option(name: .long, help: "Span-to-speech ratio above which a cluster is 'mixed_suspected' (default 3.0).")
+        public var mixedSpanRatio: Double?
+
+        @Option(name: .long, help: "Also write the audit JSON to this path.")
+        public var json: String?
+
+        public init() {}
+
+        public func run() throws {
+            let transcriptURL = try Paths.requireNonEmptyFile(transcript)
+            let sessionDir = transcriptURL.deletingLastPathComponent()
+            try SpeakerAuditEnrichment.ensureSessionContainsSourceWAVs(sessionDir: sessionDir, micPath: mic, systemPath: system)
+
+            guard let scriptPath = PythonSpeakerIdentifier.resolveHelperScriptPath(explicitOverride: helperScript) else {
+                throw ValidationError("Helper script name_one_speaker.py not found. Set STT_HELPER_SCRIPTS or pass --helper-script <dir>.")
+            }
+            let backendDir = try Transcribe.resolvePythonBackendDirectory(overridePath: pythonBackend)
+
+            var keywordArgs: [(flag: String, value: String?)] = [
+                ("--session", sessionDir.path)
+            ]
+            if force { keywordArgs.append(("--force", nil)) }
+            if let minUsefulSpeech { keywordArgs.append(("--min-useful-speech", String(minUsefulSpeech))) }
+            if let mixedSpanRatio { keywordArgs.append(("--mixed-span-ratio", String(mixedSpanRatio))) }
+            if let json { keywordArgs.append(("--json", json)) }
+
+            let arguments = PythonSpeakerIdentifier.buildHelperScriptArguments(
+                subcommand: "audit",
+                scriptPath: scriptPath,
+                rangeArguments: [],
+                keywordArguments: keywordArgs
+            )
+
+            let result = try PythonSpeakerIdentifier.runHelperScript(
+                scriptPath: scriptPath,
+                arguments: arguments,
+                workingDirectory: backendDir,
+                timeout: 120
+            )
+            if !result.succeeded {
+                FileHandle.standardError.write(result.standardError.data(using: .utf8) ?? Data())
+                throw ValidationError("Speaker audit failed (exit code \(result.exitCode)).")
+            }
+            print(result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+    }
+
+    // MARK: - stt speaker purity-preview
+
+    /// Builds and optionally plays early/middle/late + best-energy preview
+    /// clips for one speaker cluster to detect mixed-speaker clusters
+    /// *before* enrollment. If the early and late clips of the same cluster
+    /// sound like different people, enrolling the whole cluster would
+    /// contaminate a profile -- use ``enroll-ranges`` with confirmed ranges
+    /// instead.
+    ///
+    /// This command never modifies speaker profiles or transcripts. It only
+    /// writes preview clips + metadata under ``<session>/.speaker-clips/``.
+    public struct PurityPreview: ParsableCommand {
+        public static let configuration = CommandConfiguration(abstract: "Preview purity clips for a speaker cluster (read-only; detects mixed clusters).")
+
+        @Option(name: .long, help: "Path to the diarized transcript JSON (parent directory is used as the session).")
+        public var transcript: String
+
+        @Option(name: .long, help: "Diarized speaker id to preview.")
+        public var speakerId: String
+
+        @Option(name: .long, help: "Path to the mic-track source WAV (should be in the session directory as mic.wav).")
+        public var mic: String?
+
+        @Option(name: .long, help: "Path to the system-track source WAV (should be in the session directory as system.wav).")
+        public var system: String?
+
+        @Option(name: .long, help: "Python backend directory for the embedding/concatenate step (runtime/ venv).")
+        public var pythonBackend: String?
+
+        @Option(name: .long, help: "Override the path to the helper scripts directory (containing name_one_speaker.py).")
+        public var helperScript: String?
+
+        @Option(name: .long, help: "Target seconds per chronological clip (default 12).")
+        public var previewSeconds: Double?
+
+        @Option(name: .long, help: "Restrict the universe of speech to these time ranges before selecting windows (repeatable). Each value is 'start-end' (e.g. 12.0-45.0).")
+        public var range: [String] = []
+
+        @Flag(name: .long, help: "Build all clips without playing them.")
+        public var noPlay: Bool = false
+
+        @Flag(name: .long, help: "Do not loudness-normalize the preview clips.")
+        public var noNormalize: Bool = false
+
+        public init() {}
+
+        public func run() throws {
+            let transcriptURL = try Paths.requireNonEmptyFile(transcript)
+            let sessionDir = transcriptURL.deletingLastPathComponent()
+            try SpeakerAuditEnrichment.ensureSessionContainsSourceWAVs(sessionDir: sessionDir, micPath: mic, systemPath: system)
+
+            guard let scriptPath = PythonSpeakerIdentifier.resolveHelperScriptPath(explicitOverride: helperScript) else {
+                throw ValidationError("Helper script name_one_speaker.py not found. Set STT_HELPER_SCRIPTS or pass --helper-script <dir>.")
+            }
+            let backendDir = try Transcribe.resolvePythonBackendDirectory(overridePath: pythonBackend)
+
+            var keywordArgs: [(flag: String, value: String?)] = [
+                ("--session", sessionDir.path),
+                ("--speaker-id", speakerId)
+            ]
+            if let previewSeconds { keywordArgs.append(("--preview-seconds", String(previewSeconds))) }
+            if noPlay { keywordArgs.append(("--no-play", nil)) }
+            if noNormalize { keywordArgs.append(("--no-normalize", nil)) }
+
+            let arguments = PythonSpeakerIdentifier.buildHelperScriptArguments(
+                subcommand: "purity-preview",
+                scriptPath: scriptPath,
+                rangeArguments: range,
+                keywordArguments: keywordArgs
+            )
+
+            let result = try PythonSpeakerIdentifier.runHelperScript(
+                scriptPath: scriptPath,
+                arguments: arguments,
+                workingDirectory: backendDir,
+                timeout: 120
+            )
+            if !result.succeeded {
+                FileHandle.standardError.write(result.standardError.data(using: .utf8) ?? Data())
+                throw ValidationError("Speaker purity-preview failed (exit code \(result.exitCode)).")
+            }
+            print(result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+    }
+
+    // MARK: - stt speaker enroll-ranges
+
+    /// Generates a range-limited enrollment sample for one speaker from
+    /// confirmed time ranges. This is the safe alternative to whole-cluster
+    /// ``enroll`` when ``audit`` or ``purity-preview`` flag a cluster as
+    /// ``mixed_suspected``.
+    ///
+    /// At least one ``--range`` is required. Use ``--no-enroll`` for a
+    /// validation-only dry run that writes no files.
+    public struct EnrollRanges: ParsableCommand {
+        public static let configuration = CommandConfiguration(abstract: "Enroll a speaker from confirmed time ranges (safe enrollment).")
+
+        @Argument(help: "Display name to enroll.")
+        public var displayName: String
+
+        @Option(name: .long, help: "Path to the diarized transcript JSON (parent directory is used as the session).")
+        public var transcript: String
+
+        @Option(name: .long, help: "Diarized speaker id to enroll.")
+        public var speakerId: String
+
+        @Option(name: .long, help: "Time range of confirmed speech to enroll from (repeatable; at least one required). Each value is 'start-end' (e.g. 12.0-45.0).")
+        public var range: [String] = []
+
+        @Option(name: .long, help: "Path to the mic-track source WAV (should be in the session directory as mic.wav).")
+        public var mic: String?
+
+        @Option(name: .long, help: "Path to the system-track source WAV (should be in the session directory as system.wav).")
+        public var system: String?
+
+        @Option(name: .long, help: "Audio source track ('mic' or 'system'); resolved from transcript if omitted.")
+        public var source: String?
+
+        @Option(name: .long, help: "Maximum seconds of audio to sample for enrollment (default 60).")
+        public var sampleSeconds: Double?
+
+        @Flag(name: .long, help: "Do not loudness-normalize the generated enrollment sample.")
+        public var noNormalize: Bool = false
+
+        @Flag(name: .long, help: "Validation-only dry run: describe the planned enrollment and write no files.")
+        public var noEnroll: Bool = false
+
+        @Option(name: .long, help: "Python backend directory for the embedding step (runtime/ venv).")
+        public var pythonBackend: String?
+
+        @Option(name: .long, help: "Override the path to the helper scripts directory (containing name_one_speaker.py).")
+        public var helperScript: String?
+
+        public init() {}
+
+        public func run() throws {
+            guard !range.isEmpty else {
+                throw ValidationError("enroll-ranges requires at least one --range (e.g. --range 12.0-45.0). Repeat --range for multiple ranges.")
+            }
+
+            let transcriptURL = try Paths.requireNonEmptyFile(transcript)
+            let sessionDir = transcriptURL.deletingLastPathComponent()
+            try SpeakerAuditEnrichment.ensureSessionContainsSourceWAVs(sessionDir: sessionDir, micPath: mic, systemPath: system)
+
+            guard let scriptPath = PythonSpeakerIdentifier.resolveHelperScriptPath(explicitOverride: helperScript) else {
+                throw ValidationError("Helper script name_one_speaker.py not found. Set STT_HELPER_SCRIPTS or pass --helper-script <dir>.")
+            }
+            let backendDir = try Transcribe.resolvePythonBackendDirectory(overridePath: pythonBackend)
+
+            var keywordArgs: [(flag: String, value: String?)] = [
+                ("--session", sessionDir.path),
+                ("--speaker-id", speakerId),
+                ("--name", displayName)
+            ]
+            if let source { keywordArgs.append(("--source", source)) }
+            if let sampleSeconds { keywordArgs.append(("--sample-seconds", String(sampleSeconds))) }
+            if noNormalize { keywordArgs.append(("--no-normalize", nil)) }
+            if noEnroll { keywordArgs.append(("--no-enroll", nil)) }
+
+            let arguments = PythonSpeakerIdentifier.buildHelperScriptArguments(
+                subcommand: "enroll-ranges",
+                scriptPath: scriptPath,
+                rangeArguments: range,
+                keywordArguments: keywordArgs
+            )
+
+            let result = try PythonSpeakerIdentifier.runHelperScript(
+                scriptPath: scriptPath,
+                arguments: arguments,
+                workingDirectory: backendDir,
+                timeout: 180
+            )
+            if !result.succeeded {
+                FileHandle.standardError.write(result.standardError.data(using: .utf8) ?? Data())
+                throw ValidationError("Speaker enroll-ranges failed (exit code \(result.exitCode)).")
+            }
+            print(result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+    }
+
+    // MARK: - stt speaker suggest-labels
+
+    /// Matches every diarized cluster against enrolled profiles and emits
+    /// non-mutating label suggestions. This is a read-only operation: it
+    /// never writes to the transcript or profile files.
+    ///
+    /// When no profiles are enrolled, the result explicitly reports the
+    /// ``no_profiles`` state. When profiles exist, each cluster gets a
+    /// best-match score, and duplicate/mixed clusters are flagged.
+    public struct SuggestLabels: ParsableCommand {
+        public static let configuration = CommandConfiguration(abstract: "Suggest speaker labels by matching clusters against profiles (read-only).")
+
+        @Option(name: .long, help: "Path to the diarized transcript JSON.")
+        public var transcript: String
+
+        @Option(name: .long, help: "Path to the mic-track source WAV (repeatable source audio).")
+        public var mic: String?
+
+        @Option(name: .long, help: "Path to the system-track source WAV (repeatable source audio).")
+        public var system: String?
+
+        @Option(name: .long, help: "Path to the Python backend directory containing stt_vibevoice.")
+        public var pythonBackend: String?
+
+        @Option(name: .long, help: "Path to stt config JSON (for provider/threshold defaults).")
+        public var config: String?
+
+        @Option(name: .long, help: "Override the configured speaker profiles directory.")
+        public var profilesDir: String?
+
+        @Option(name: .long, help: "Embedding provider to use (default: from config, else mfcc-test).")
+        public var provider: String?
+
+        @Option(name: .long, help: "Minimum confidence to consider a profile match (default: from config, else 0.78).")
+        public var threshold: Double?
+
+        @Option(name: .long, help: "Minimum margin over runner-up profile to consider a match (default: from config, else 0.05).")
+        public var margin: Double?
+
+        @Option(name: .long, help: "Minimum total speech seconds to extract an embedding per cluster (default: from config, else 8.0).")
+        public var minimumSpeechSeconds: Double?
+
+        @Option(name: .long, help: "Session directory path (echoed into provenance; defaults to the transcript's parent).")
+        public var session: String?
+
+        @Flag(name: .long, help: "Skip per-window mixed-cluster detection.")
+        public var noWindows: Bool = false
+
+        @Option(name: .long, help: "Number of chronological windows for mixed-cluster detection (default 2).")
+        public var nWindows: Int?
+
+        @Option(name: .long, help: "Path to write the suggestions JSON.")
+        public var json: String?
+
+        public init() {}
+
+        public func run() throws {
+            let sttConfig = try STTConfigLoader.load(explicitPath: config)
+            let profilesDirectory = SpeakerCLISupport.resolveProfilesDirectory(config: sttConfig, overridePath: profilesDir)
+            let backendDir = try Transcribe.resolvePythonBackendDirectory(overridePath: pythonBackend)
+            let providerName = SpeakerCLISupport.resolvedProvider(cliValue: provider, config: sttConfig)
+            let thresholdValue = SpeakerCLISupport.resolvedThreshold(cliValue: threshold, config: sttConfig)
+            let marginValue = SpeakerCLISupport.resolvedMargin(cliValue: margin, config: sttConfig)
+            let minSeconds = SpeakerCLISupport.resolvedMinimumSpeechSeconds(cliValue: minimumSpeechSeconds, config: sttConfig)
+
+            let transcriptURL = try Paths.requireNonEmptyFile(transcript)
+            let sessionPath = session ?? transcriptURL.deletingLastPathComponent().path
+
+            var audioSources: [(source: String, path: String)] = []
+            if let mic { audioSources.append((source: "mic", path: mic)) }
+            if let system { audioSources.append((source: "system", path: system)) }
+
+            // Write flattened profiles to a temp file for the backend to read.
+            let store = SpeakerProfileStore(directory: profilesDirectory)
+            let profiles = try store.listProfiles()
+            let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("stt-suggest-labels-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tmpDir) }
+            let profilesURL = tmpDir.appendingPathComponent("profiles.json")
+            try PythonSpeakerIdentifier.writeFlattenedProfiles(profiles, to: profilesURL)
+
+            let result = try PythonSpeakerIdentifier.suggestLabels(
+                transcript: transcriptURL.path,
+                audioSources: audioSources,
+                profilesPath: profilesURL.path,
+                provider: providerName,
+                threshold: thresholdValue,
+                margin: marginValue,
+                minimumSpeechSeconds: minSeconds,
+                session: sessionPath,
+                noWindows: noWindows,
+                nWindows: nWindows ?? 2,
+                jsonOutputPath: json,
+                workingDirectory: backendDir,
+                timeout: 120
+            )
+
+            if let json {
+                print("Suggestions written to \(json).")
+            }
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(result)
+            print(String(data: data, encoding: .utf8) ?? "{}")
         }
     }
 }
