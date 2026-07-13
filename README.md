@@ -17,6 +17,7 @@ Implemented:
 - Pipeline metadata (`metadata.json`) written under each run directory.
 - Best-effort WAV mix-down for compatible meeting-mode `mic.wav` + `system.wav` tracks.
 - Meeting pipelines default to separate mic/system transcription and timestamp-based transcript merging so overlapping microphone speech is not masked by system audio. `mixed.wav` remains available for playback/reference, and `--meeting-transcription mixed` preserves the legacy single-pass mixed-audio behavior.
+- Speaker identification via pluggable embedding providers (`mfcc-test` for tests, `speechbrain` for real ECAPA-VoxCeleb embeddings), including a **safe speaker enrollment workflow** that guards against mixed and duplicate diarisation clusters: `stt speaker audit`, `purity-preview`, `suggest-labels`, `enroll-ranges`, and segment-level `relabel` — with provenance metadata recorded on enrolled profiles. See the **Speaker identification** section below.
 - Bounded validation script: `scripts/validate.sh`.
 
 Still incomplete:
