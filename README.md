@@ -301,6 +301,33 @@ stt transcribe meeting.wav --identify-speakers --speaker-provider speechbrain
 
 If `speechbrain`/`torchaudio` are missing, or the current interpreter can't import them, these commands fail with an actionable `SpeakerIdError` message rather than a raw stack trace.
 
+### Safe speaker enrollment (mixed & duplicate clusters)
+
+Real diarisation can produce **mixed clusters** (two people collapsed into one `Speaker N`) and **duplicate clusters** (the same person split across mic/system tracks). Enrolling a whole mixed cluster would build a profile from two voices and contaminate it. `stt speaker` ships read-only safety commands plus a guarded `enroll-ranges` for confirmed-speech enrollment:
+
+```bash
+# 1. Audit every cluster (read-only) → speaker_audit.json with safe_to_enroll_whole_cluster flags
+stt speaker audit --transcript <session>/transcript.json \
+  --mic <session>/mic.wav --system <session>/system.wav --python-backend runtime/
+
+# 2. Audio-confirm a suspicious cluster (early/middle/late + best-energy clips)
+stt speaker purity-preview --transcript <session>/transcript.json \
+  --speaker-id <id> --mic <session>/mic.wav --system <session>/system.wav --python-backend runtime/
+
+# 3. Match clusters against profiles; flags duplicate/mixed clusters (read-only)
+stt speaker suggest-labels --transcript <session>/transcript.json \
+  --mic <session>/mic.wav --system <session>/system.wav --provider speechbrain --python-backend runtime/
+
+# 4. Enroll a mixed cluster from only confirmed ranges (never whole-cluster audio)
+stt speaker enroll-ranges "<name>" --transcript <session>/transcript.json \
+  --speaker-id <id> --range 12.0-45.0 --range 200.0-240.0 \
+  --mic <session>/mic.wav --system <session>/system.wav --python-backend runtime/
+```
+
+`audit` classifies each cluster as `pure_likely` (safe for whole-cluster enrollment), `mixed_suspected` (unsafe — use `enroll-ranges`), or `unknown` (too little speech). `enroll-ranges` builds a range-limited sample from **only** the requested ranges and records provenance (source session, transcript, track, diarised speaker id, confirmed ranges) on the profile; it never falls back to whole-cluster audio. `enroll-ranges --no-enroll` is a validation-only dry run.
+
+For the turn-by-turn agent workflow (preview → wait for the user's name → enroll → relabel transcript segments by confirmed name while preserving `speaker_id`), the `name_one_speaker.py` helper exposes the same commands plus a guarded `enroll` (which refuses unsafe whole clusters before any audio playback) and a `relabel` command. See the **"Safe speaker enrollment"** section of the `stt-meeting-recordings` skill for the full recommended order, the Tristan duplicate-cluster and Domingo/Gia mixed-cluster worked examples, and failure handling.
+
 ## Python backend readiness
 
 `stt doctor` prints Python backend readiness and an actionable setup hint when dependencies are missing. Add `--require-backend-ready` when you want `doctor` to exit non-zero unless the transcription backend is fully ready. The backend is ready only when Apple Silicon, ffmpeg/ffprobe, and required modules are available. The Python status module also supports machine-readable checks:
