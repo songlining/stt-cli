@@ -32,5 +32,8 @@ htmlcov/
 # Logs
 *.log
 
+# Local ralpi execution state and session transcripts
+.ralpi/
+
 # Generated distributions
 dist/
