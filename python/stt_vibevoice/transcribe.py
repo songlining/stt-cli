@@ -5,7 +5,7 @@ Usage:
         [--output out.txt] [--json out.json] \
         [--device auto|gpu|cpu] [--model <path>] [--max-new-tokens N]
 
-Design notes (see LEARNINGS.md / SWIFT_CLI_AUDIO_CAPTURE_DECISION.md):
+Design notes (see SWIFT_CLI_AUDIO_CAPTURE_DECISION.md):
   - Audio is normalized to 16kHz mono 16-bit PCM WAV first (normalize.py).
   - mlx / mlx_audio are imported lazily, inside functions, so that running
     `--help` or `doctor`-style checks never requires MLX to be installed.

@@ -2,6 +2,9 @@
 
 Native macOS speech-to-text CLI prototype in Swift, with a Python/MLX VibeVoice transcription backend.
 
+[![CI](https://github.com/songlining/stt-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/songlining/stt-cli/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 ## Current status
 
 Implemented:
@@ -377,3 +380,7 @@ python3 -m pip install 'mlx-audio[stt]'
 ## Notes on tests
 
 This machine has Command Line Tools but not full Xcode/XCTest. The Swift package therefore uses Swift Testing plus an executable check harness (`sttUnitChecks`) for deterministic validation in this environment.
+
+## License
+
+Licensed under the [MIT License](LICENSE).

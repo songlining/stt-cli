@@ -35,5 +35,8 @@ htmlcov/
 # Local ralpi execution state and session transcripts
 .ralpi/
 
+# Internal agent/planning docs (kept locally, not published)
+docs/internal/
+
 # Generated distributions
 dist/

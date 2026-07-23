@@ -3,7 +3,7 @@
 ``doctor()`` never raises: every check is wrapped so that a missing
 dependency, missing binary, or unset env var just shows up as ``False``/
 ``None`` in the report rather than crashing the CLI. This mirrors the
-"doctor"/"setup" command idea from LEARNINGS.md.
+"doctor"/"setup" command idea.
 """
 
 from __future__ import annotations
