@@ -5,6 +5,41 @@ Native macOS speech-to-text CLI prototype in Swift, with a Python/MLX VibeVoice 
 [![CI](https://github.com/songlining/stt-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/songlining/stt-cli/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
+## Prerequisites
+
+- macOS 14.4+ on Apple Silicon (native process-tap capture requires 14.4; MLX requires Apple Silicon)
+- Xcode Command Line Tools (`xcode-select --install`)
+- `ffmpeg`/`ffprobe` on `PATH` (audio normalization)
+- Python 3.11 or 3.12 (MLX/PyTorch support; see [Python backend readiness](#python-backend-readiness))
+- For speaker identification: optional `speechbrain` + `torchaudio` (see [Speaker identification](#speaker-identification-speechbrain-provider))
+
+## Install
+
+```bash
+git clone https://github.com/songlining/stt-cli.git
+cd stt-cli
+
+# Build the Swift CLI
+swift build
+
+# Bootstrap the Python transcription backend (MLX/VibeVoice dependencies)
+./scripts/bootstrap-python-backend.sh --mlx
+
+# Verify everything works
+./scripts/validate.sh
+```
+
+For an app bundle (recommended for correct macOS microphone-permission attribution):
+
+```bash
+./scripts/build-app-bundle.sh
+./dist/stt.app/Contents/MacOS/stt doctor
+```
+
+The ASR model (e.g. `mlx-community/VibeVoice-ASR-8bit`) is downloaded from Hugging Face on first use and cached in the default Hugging Face cache (`~/.cache/huggingface`). Ensure network access for the first run, or pre-populate the cache directory on another machine and copy it over.
+
+See [Python backend readiness](#python-backend-readiness) for runtime layout, lookup order, and readiness checks, and [Build app bundle](#build-app-bundle) for signing options.
+
 ## Current status
 
 Implemented:
@@ -228,8 +263,6 @@ Transcribe existing meeting tracks with separate mic/system ASR passes and a mer
 ```
 
 This also writes per-source artifacts next to the merged output, such as `transcript.mic.txt`, `transcript.mic.json`, `transcript.system.txt`, and `transcript.system.json`.
-
-The ASR model (e.g. `mlx-community/VibeVoice-ASR-8bit`) is downloaded from Hugging Face on first use and cached in the default Hugging Face cache (`~/.cache/huggingface`). Ensure network access for the first run, or pre-populate the cache directory on another machine and copy it over.
 
 Transcribe an existing single audio file with explicit backend settings:
 
