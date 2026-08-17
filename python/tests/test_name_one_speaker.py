@@ -31,21 +31,17 @@ from pathlib import Path
 
 import pytest
 
-HELPER_SCRIPTS = Path(
-    os.environ.get(
-        "STT_HELPER_SCRIPTS",
-        "/Users/larry.song/.pi/agent/skills/stt-meeting-recordings/scripts",
-    )
-)
+HELPER_SCRIPTS = Path(os.environ["STT_HELPER_SCRIPTS"]) if os.environ.get("STT_HELPER_SCRIPTS") else None
 
-if str(HELPER_SCRIPTS) not in sys.path:
+if HELPER_SCRIPTS is not None and str(HELPER_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(HELPER_SCRIPTS))
 
-# Skip the entire module if the helper is not installed (e.g. CI on a machine
-# without the Pi skills directory). On the development machine it is present.
+# Skip the entire module unless STT_HELPER_SCRIPTS points at a directory
+# containing name_one_speaker.py. The helper is an external dependency that
+# ships separately from this repo, so it is never auto-discovered.
 pytestmark = pytest.mark.skipif(
-    not (HELPER_SCRIPTS / "name_one_speaker.py").exists(),
-    reason=f"name_one_speaker.py not found under {HELPER_SCRIPTS}",
+    HELPER_SCRIPTS is None or not (HELPER_SCRIPTS / "name_one_speaker.py").exists(),
+    reason="STT_HELPER_SCRIPTS unset or name_one_speaker.py not found under it",
 )
 
 import name_one_speaker as helper  # noqa: E402

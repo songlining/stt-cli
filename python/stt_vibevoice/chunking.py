@@ -3,7 +3,7 @@
 Everything in this module is deliberately free of MLX/mlx-audio/numpy
 dependencies so it can be exercised by fast unit tests without any ML
 runtime installed. It mirrors the chunking/merge strategy used by
-vibecorder's ``VibeVoiceTranscriber`` (overlapping windows + boundary
+a reference VibeVoice transcriber (overlapping windows + boundary
 dedup) but in a simplified, framework-agnostic form.
 """
 

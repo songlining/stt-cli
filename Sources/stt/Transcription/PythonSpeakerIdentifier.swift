@@ -507,16 +507,18 @@ public enum PythonSpeakerIdentifier {
 
     // MARK: - Helper script runner (audit / purity-preview / enroll-ranges)
 
-    /// Default helper script search path. The helper script
-    /// (``name_one_speaker.py``) lives outside this repo (in the Pi skills
-    /// directory). Override with ``STT_HELPER_SCRIPTS`` env var or the
-    /// ``--helper-script`` CLI option.
+    /// Helper script search path. The helper script
+    /// (``name_one_speaker.py``) is an external dependency that ships
+    /// separately from this repo; it is not bundled or auto-discovered. Point
+    /// the CLI at it with the ``STT_HELPER_SCRIPTS`` env var or the
+    /// ``--helper-script`` CLI option. Returns ``nil`` when neither is set.
     public static func defaultHelperScriptsDirectory(environment: [String: String] = ProcessInfo.processInfo.environment) -> String? {
         if let envValue = environment["STT_HELPER_SCRIPTS"], !envValue.isEmpty {
             return envValue
         }
-        // Known default on the development machine.
-        return "\(NSHomeDirectory())/.pi/agent/skills/stt-meeting-recordings/scripts"
+        // No implicit default: the helper is an external dependency and must
+        // be configured explicitly via STT_HELPER_SCRIPTS or --helper-script.
+        return nil
     }
 
     /// Resolves the helper script path. Returns the full path to

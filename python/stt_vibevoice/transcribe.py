@@ -5,12 +5,12 @@ Usage:
         [--output out.txt] [--json out.json] \
         [--device auto|gpu|cpu] [--model <path>] [--max-new-tokens N]
 
-Design notes (see SWIFT_CLI_AUDIO_CAPTURE_DECISION.md):
+Design notes (see docs/SWIFT_CLI_AUDIO_CAPTURE_DECISION.md):
   - Audio is normalized to 16kHz mono 16-bit PCM WAV first (normalize.py).
   - mlx / mlx_audio are imported lazily, inside functions, so that running
     `--help` or `doctor`-style checks never requires MLX to be installed.
   - Long audio is chunked with overlap (chunking.py) and results are merged
-    with boundary dedup, mirroring vibecorder's VibeVoiceTranscriber.
+    with boundary dedup, mirroring a reference VibeVoice transcriber.
   - Device selection defaults to "auto", with automatic fallback to CPU on
     Metal timeout / out-of-memory errors.
 """
@@ -153,7 +153,7 @@ def _run_model_on_file(
 ) -> dict:
     """Invoke mlx_audio.stt.generate.generate_transcription on one file.
 
-    Mirrors the call pattern in vibecorder's VibeVoiceTranscriber._run_vibevoice.
+    Mirrors the call pattern in a reference VibeVoice transcriber.
     """
     if device == "cpu":
         mx.set_default_device(mx.cpu)

@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 # Modules mlx-audio's VibeVoice ASR path depends on. Mirrors
-# VibeVoiceTranscriber.REQUIRED_MODULES in vibecorder's src/transcriber.py.
+# VibeVoiceTranscriber.REQUIRED_MODULES in a reference VibeVoice transcriber.
 REQUIRED_MODULES = ("mlx", "mlx_audio", "huggingface_hub", "sentencepiece")
 
 RUNTIME_ENV_VAR = "STT_VIBEVOICE_RUNTIME"

@@ -1,6 +1,6 @@
 """Audio normalization: convert arbitrary input audio to 16kHz mono 16-bit PCM WAV.
 
-Mirrors the ffmpeg invocation used by vibecorder's transcriber
+Mirrors the ffmpeg invocation used by a reference VibeVoice transcriber
 (``ffmpeg -y -i <input> -ar 16000 -ac 1 -c:a pcm_s16le <output>``), but adds a
 fast path that skips the ffmpeg subprocess entirely when the input is
 already a WAV file matching the target format.

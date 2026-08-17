@@ -893,7 +893,7 @@ func runChecks() throws {
         try checkEqual(defaultDir, "/custom/scripts", "defaultHelperScriptsDirectory prefers env override")
 
         let fallbackDir = PythonSpeakerIdentifier.defaultHelperScriptsDirectory(environment: [:])
-        try check(fallbackDir?.hasSuffix("/.pi/agent/skills/stt-meeting-recordings/scripts") == true, "defaultHelperScriptsDirectory falls back to known default")
+        try check(fallbackDir == nil, "defaultHelperScriptsDirectory returns nil when STT_HELPER_SCRIPTS is unset")
 
         let missingScript = PythonSpeakerIdentifier.resolveHelperScriptPath(
             explicitOverride: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path,

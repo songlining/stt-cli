@@ -393,9 +393,9 @@ struct PythonSpeakerIdentifierTests {
         #expect(path == "/custom/scripts")
     }
 
-    @Test func defaultHelperScriptsDirectoryFallsBackToKnownDefault() {
+    @Test func defaultHelperScriptsDirectoryReturnsNilWhenUnconfigured() {
         let path = PythonSpeakerIdentifier.defaultHelperScriptsDirectory(environment: [:])
-        #expect(path?.hasSuffix("/.pi/agent/skills/stt-meeting-recordings/scripts") == true)
+        #expect(path == nil)
     }
 
     @Test func resolveHelperScriptPathReturnsNilWhenScriptMissing() {
