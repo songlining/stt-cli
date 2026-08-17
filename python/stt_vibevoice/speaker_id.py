@@ -1,7 +1,7 @@
 """Speaker embedding extraction and matching backend.
 
 Implements the ``extract`` and ``match`` CLI contracts documented in
-``SPEAKER_IDENTIFICATION_PLAN.md``. Heavy ML dependencies (e.g.
+``docs/SPEAKER_IDENTIFICATION_PLAN.md``. Heavy ML dependencies (e.g.
 ``speechbrain``) are imported lazily inside provider functions so that
 ``python -m stt_vibevoice.speaker_id --help`` and the default test suite
 never require them.
@@ -763,7 +763,7 @@ def match_candidate(
 ) -> Dict[str, Any]:
     """Compares one candidate embedding against a flattened profile list.
 
-    See ``SPEAKER_IDENTIFICATION_PLAN.md`` "Python matching contract" for
+    See ``docs/SPEAKER_IDENTIFICATION_PLAN.md`` "Python matching contract" for
     the exact output schema. Swift owns final cross-speaker conflict
     resolution; this only scores one candidate against all profiles.
     """

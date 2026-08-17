@@ -118,7 +118,7 @@ stt-cli/
 ├── README.md
 ├── LEARNINGS.md
 ├── RUST_CLI_INVESTIGATION.md
-├── SWIFT_CLI_AUDIO_CAPTURE_DECISION.md
+├── docs/SWIFT_CLI_AUDIO_CAPTURE_DECISION.md
 ├── python/
 │   └── stt_vibevoice/
 │       ├── __init__.py
