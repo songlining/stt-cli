@@ -9,7 +9,7 @@ Native macOS speech-to-text CLI prototype in Swift, with a Python/MLX VibeVoice 
 
 Implemented:
 
-- Swift CLI commands: `doctor`, `devices`, `record`, `transcribe`, `transcribe-meeting`, `pipeline`, `permissions`.
+- Swift CLI commands: `doctor`, `devices`, `record`, `mix`, `transcribe`, `transcribe-meeting`, `pipeline`, `permissions`.
 - Finite recordings via `--duration` for safe smoke tests.
 - Microphone recording to WAV.
 - Native CoreAudio process-tap system-output capture (macOS 14.4+ `AudioHardwareCreateProcessTap`), used as the primary `--mode system`/`--mode meeting` path and verified to capture real, non-silent system audio on Apple Silicon.
@@ -112,7 +112,7 @@ Local builds are ad-hoc signed by default. Developer ID signing and hardened run
 CODESIGN_IDENTITY="Developer ID Application: Example, Inc. (TEAMID)" HARDENED_RUNTIME=1 ./scripts/build-app-bundle.sh
 ```
 
-See [`DISTRIBUTION.md`](DISTRIBUTION.md) for the Developer ID signing, notarization, and Homebrew cask plan.
+See [`DISTRIBUTION.md`](docs/DISTRIBUTION.md) for the Developer ID signing, notarization, and Homebrew cask plan.
 
 ## Manual TCC attribution smoke test
 
@@ -245,7 +245,7 @@ Transcribe an existing single audio file with explicit backend settings:
 
 ## Speaker identification (speechbrain provider)
 
-`stt speaker enroll`, `stt identify`, and `--identify-speakers` use a pluggable embedding provider (see `SPEAKER_IDENTIFICATION_PLAN.md`). Two providers exist:
+`stt speaker enroll`, `stt identify`, and `--identify-speakers` use a pluggable embedding provider (see `docs/SPEAKER_IDENTIFICATION_PLAN.md`). Two providers exist:
 
 - `mfcc-test`: stdlib-only, deterministic, but not real speaker recognition. Used for tests/smoke checks only -- never present it to users as accurate identity matching.
 - `speechbrain`: real speaker embeddings using `speechbrain/spkrec-ecapa-voxceleb` (ECAPA-TDNN trained on VoxCeleb). This is the provider to use for actual speaker identification.
@@ -295,6 +295,10 @@ PYTHONPATH=./python python/.venv/bin/python -m stt_vibevoice.status
 
 Speaker identification is opt-in and does not affect the overall `ready` status used by `--require-backend-ready` for transcription; that flag only covers the MLX/VibeVoice ASR backend.
 
+## Pi agent skill
+
+This repo bundles the `stt-meeting-recordings` agent skill for [pi](https://github.com/earendil-works/pi) at `.pi/skills/stt-meeting-recordings/` — SKILL.md plus the meeting-recordings helper scripts (`recordings.py`, `meeting_lookup.py`, `name_one_speaker.py`) and their tests. It is a sanitized copy of the author's personal workflow: set `STT_BIN` and `OBSIDIAN_VAULT` to your own stt build and notes vault (defaults: repo-root build, `~/obsidian-notes`). Instructions for the Obsidian kanban/`outlook-cli` integration are documented in the skill; the underlying `record`/`transcribe`/`speaker` commands are what this README covers.
+
 ### Usage
 
 ```bash
@@ -307,30 +311,30 @@ If `speechbrain`/`torchaudio` are missing, or the current interpreter can't impo
 
 ### Safe speaker enrollment (mixed & duplicate clusters)
 
-Real diarisation can produce **mixed clusters** (two people collapsed into one `Speaker N`) and **duplicate clusters** (the same person split across mic/system tracks). Enrolling a whole mixed cluster would build a profile from two voices and contaminate it. `stt speaker` ships read-only safety commands plus a guarded `enroll-ranges` for confirmed-speech enrollment:
+Real diarisation can produce **mixed clusters** (two people collapsed into one `Speaker N`) and **duplicate clusters** (the same person split across mic/system tracks). Enrolling a whole mixed cluster would build a profile from two voices and contaminate it. `stt speaker` ships read-only safety commands plus a guarded `enroll-ranges` for confirmed-speech enrollment. All four commands need the helper scripts directory (see `STT_HELPER_SCRIPTS` / `--helper-script` below) and a ready Python backend:
 
 ```bash
 # 1. Audit every cluster (read-only) → speaker_audit.json with safe_to_enroll_whole_cluster flags
 stt speaker audit --transcript <session>/transcript.json \
-  --mic <session>/mic.wav --system <session>/system.wav --python-backend runtime/
+  --mic <session>/mic.wav --system <session>/system.wav --python-backend ./python --helper-script .pi/skills/stt-meeting-recordings/scripts
 
 # 2. Audio-confirm a suspicious cluster (early/middle/late + best-energy clips)
 stt speaker purity-preview --transcript <session>/transcript.json \
-  --speaker-id <id> --mic <session>/mic.wav --system <session>/system.wav --python-backend runtime/
+  --speaker-id <id> --mic <session>/mic.wav --system <session>/system.wav --python-backend ./python --helper-script .pi/skills/stt-meeting-recordings/scripts
 
 # 3. Match clusters against profiles; flags duplicate/mixed clusters (read-only)
 stt speaker suggest-labels --transcript <session>/transcript.json \
-  --mic <session>/mic.wav --system <session>/system.wav --provider speechbrain --python-backend runtime/
+  --mic <session>/mic.wav --system <session>/system.wav --provider speechbrain --python-backend ./python --helper-script .pi/skills/stt-meeting-recordings/scripts
 
 # 4. Enroll a mixed cluster from only confirmed ranges (never whole-cluster audio)
 stt speaker enroll-ranges "<name>" --transcript <session>/transcript.json \
   --speaker-id <id> --range 12.0-45.0 --range 200.0-240.0 \
-  --mic <session>/mic.wav --system <session>/system.wav --python-backend runtime/
+  --mic <session>/mic.wav --system <session>/system.wav --python-backend ./python --helper-script .pi/skills/stt-meeting-recordings/scripts
 ```
 
 `audit` classifies each cluster as `pure_likely` (safe for whole-cluster enrollment), `mixed_suspected` (unsafe — use `enroll-ranges`), or `unknown` (too little speech). `enroll-ranges` builds a range-limited sample from **only** the requested ranges and records provenance (source session, transcript, track, diarised speaker id, confirmed ranges) on the profile; it never falls back to whole-cluster audio. `enroll-ranges --no-enroll` is a validation-only dry run.
 
-For the turn-by-turn agent workflow (preview → wait for the user's name → enroll → relabel transcript segments by confirmed name while preserving `speaker_id`), the `name_one_speaker.py` helper exposes the same commands plus a guarded `enroll` (which refuses unsafe whole clusters before any audio playback) and a `relabel` command. See the **"Safe speaker enrollment"** section of the `stt-meeting-recordings` skill for the full recommended order, the Tristan duplicate-cluster and Domingo/Gia mixed-cluster worked examples, and failure handling.
+For the turn-by-turn agent workflow (preview → wait for the user's name → enroll → relabel transcript segments by confirmed name while preserving `speaker_id`), the `name_one_speaker.py` helper exposes the same commands plus a guarded `enroll` (which refuses unsafe whole clusters before any audio playback) and a `relabel` command. The helper ships in this repo as part of the bundled Pi skill at `.pi/skills/stt-meeting-recordings/scripts/` (see **Pi agent skill** below). Point the CLI at it with the `STT_HELPER_SCRIPTS` environment variable or the `--helper-script <dir>` option. If neither is set, the `speaker audit` / `purity-preview` / `enroll-ranges` commands fail with an actionable error rather than guessing a location.
 
 ## Python backend readiness
 

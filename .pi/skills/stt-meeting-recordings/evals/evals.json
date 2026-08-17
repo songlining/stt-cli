@@ -1,0 +1,47 @@
+{
+  "skill_name": "stt-meeting-recordings",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Start recording my meeting with Acme Bank about Vault PKI. Don't transcribe yet.",
+      "expected_output": "Runs the Outlook calendar meeting lookup (scripts/meeting_lookup.py, wrapping the outlook-cli skill) to identify the current/forthcoming meeting; titles the recording after the real meeting when one matches (falling back to the user-provided title otherwise). Starts a background stt recording in meeting mode, creates an Obsidian session folder and meeting recordings kanban card, and explicitly confirms transcription was not started.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Stop the current recording and show me where it saved.",
+      "expected_output": "Stops the active stt recording via the helper, reports audio files/session path, and moves the card to To Transcribe. If the helper reports recording_stop_unverified instead of recording_stopped (it could not verify the recorder's process identity before signalling it), explains that it deliberately did not kill an unverified process and asks the user to inspect the PID manually.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "Transcribe the latest meeting recording from earlier today.",
+      "expected_output": "Runs transcription only after recording has stopped, writes transcript.md/transcript.json beside the audio (promoted from the run's own staging directory after postcondition validation), updates session.md, and moves the kanban card to Transcribed. Sets the agent-harness/tool-call timeout generously before invoking transcribe -- at least 10800 seconds (3 hours), and higher for very long inputs (scaling with track count and the resolved per-track timeout) -- rather than assuming a flat 10800s always suffices.",
+      "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "Check whether my meeting is still being recorded or transcribed right now.",
+      "expected_output": "Runs the status subcommand and reports both recording state and transcription state from the single JSON payload (including the nested transcription object), without needing separate commands. Does not claim status guarantees the child survived a harness timeout -- only that it was designed to and that status re-verifies.",
+      "files": []
+    },
+    {
+      "id": 5,
+      "prompt": "The transcription of my last meeting got interrupted (the agent timed out). Can you pick it back up without losing progress?",
+      "expected_output": "Explains that the harness timeout only killed the synchronous helper (not the background stt process, which is designed to survive an ordinary parent/group timeout via start_new_session=True, though this must be verified rather than assumed), checks status first to see if the child process is still running, and then runs `transcribe --resume` on that session -- finalizing immediately if this attempt's own run-specific staged output is valid (or, for a legacy session with no recorded run id, a schema-valid canonical transcript newer than when transcription started), or safely rerunning the full command with the currently requested options otherwise, with a warning that a full rerun may overwrite partial per-track artifacts and is not necessarily identical to whatever command produced the original attempt.",
+      "files": []
+    },
+    {
+      "id": 6,
+      "prompt": "Transcription said it finished successfully but there's no transcript file / the JSON looks broken -- what happened?",
+      "expected_output": "Explains that a zero exit code from stt is not treated as success on its own: the helper validates transcript.json has the expected shape (a dict with a segments list, or a supported top-level list) and that transcript.md is non-empty before promoting anything into the session folder. If validation fails, the session is marked transcription_failed with a clear failure_reason, and the transcription log plus the run's staging directory are preserved (not deleted) for inspection. Does not claim any pre-existing old transcript.md/json in the session folder was produced by this attempt.",
+      "files": []
+    },
+    {
+      "id": 7,
+      "prompt": "Record this meeting for 45 minutes, then transcribe, distill, file, update the latest meeting notes and remove the wav files.",
+      "expected_output": "Resolves the meeting title via the Outlook calendar lookup (scripts/meeting_lookup.py) and honors the user's explicit duration. Starts a meeting-mode recording with --duration 2700 --wait (auto-stop after 45 minutes, no separate stop needed) and reports start details; once the recorder exits and the kanban card is in To Transcribe, transcribes the session with a generous harness timeout (at least 10800s, scaled for long meetings) and waits for a transcribed outcome; distills transcript.md into <session>/summary.md; files and updates the customer's latest meeting notes by appending a dated section to raw/HashiCorp/customers/<Customer>/<series>.md only when a matching customer note exists -- skipping that step entirely (without inventing a folder) and noting the skip if none matches; then always removes the session's own top-level .wav files to macOS Trash after verifying recording and transcription are inactive and the transcript is substantive, updating metadata.json and session.md while keeping the kanban card in Transcribed. Reports each stage as it completes.",
+      "files": []
+    }
+  ]
+}
