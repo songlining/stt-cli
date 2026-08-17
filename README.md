@@ -229,6 +229,8 @@ Transcribe existing meeting tracks with separate mic/system ASR passes and a mer
 
 This also writes per-source artifacts next to the merged output, such as `transcript.mic.txt`, `transcript.mic.json`, `transcript.system.txt`, and `transcript.system.json`.
 
+The ASR model (e.g. `mlx-community/VibeVoice-ASR-8bit`) is downloaded from Hugging Face on first use and cached in the default Hugging Face cache (`~/.cache/huggingface`). Ensure network access for the first run, or pre-populate the cache directory on another machine and copy it over.
+
 Transcribe an existing single audio file with explicit backend settings:
 
 ```bash
