@@ -295,9 +295,9 @@ PYTHONPATH=./python python/.venv/bin/python -m stt_vibevoice.status
 
 Speaker identification is opt-in and does not affect the overall `ready` status used by `--require-backend-ready` for transcription; that flag only covers the MLX/VibeVoice ASR backend.
 
-## Pi agent skill
+## Agent skill
 
-This repo bundles the `stt-meeting-recordings` agent skill for [pi](https://github.com/earendil-works/pi) at `.pi/skills/stt-meeting-recordings/` — SKILL.md plus the meeting-recordings helper scripts (`recordings.py`, `meeting_lookup.py`, `name_one_speaker.py`) and their tests. It is a sanitized copy of the author's personal workflow: set `STT_BIN` and `OBSIDIAN_VAULT` to your own stt build and notes vault (defaults: repo-root build, `~/obsidian-notes`). Instructions for the Obsidian kanban/`outlook-cli` integration are documented in the skill; the underlying `record`/`transcribe`/`speaker` commands are what this README covers.
+This repo bundles the `stt-meeting-recordings` agent skill at `skills/stt-meeting-recordings/` — SKILL.md plus the meeting-recordings helper scripts (`recordings.py`, `meeting_lookup.py`, `name_one_speaker.py`) and their tests. The directory follows the common `skills/` layout so any harness can use it: pi picks it up via the repo's `.pi/settings.json` (which points at `../skills`); Claude Code and other agents can symlink or configure the same directory. It is a sanitized copy of the author's personal workflow: set `STT_BIN` and `OBSIDIAN_VAULT` to your own stt build and notes vault (defaults: repo-root build, `~/obsidian-notes`). Instructions for the Obsidian kanban/`outlook-cli` integration are documented in the skill; the underlying `record`/`transcribe`/`speaker` commands are what this README covers.
 
 ### Usage
 
@@ -316,25 +316,25 @@ Real diarisation can produce **mixed clusters** (two people collapsed into one `
 ```bash
 # 1. Audit every cluster (read-only) → speaker_audit.json with safe_to_enroll_whole_cluster flags
 stt speaker audit --transcript <session>/transcript.json \
-  --mic <session>/mic.wav --system <session>/system.wav --python-backend ./python --helper-script .pi/skills/stt-meeting-recordings/scripts
+  --mic <session>/mic.wav --system <session>/system.wav --python-backend ./python --helper-script skills/stt-meeting-recordings/scripts
 
 # 2. Audio-confirm a suspicious cluster (early/middle/late + best-energy clips)
 stt speaker purity-preview --transcript <session>/transcript.json \
-  --speaker-id <id> --mic <session>/mic.wav --system <session>/system.wav --python-backend ./python --helper-script .pi/skills/stt-meeting-recordings/scripts
+  --speaker-id <id> --mic <session>/mic.wav --system <session>/system.wav --python-backend ./python --helper-script skills/stt-meeting-recordings/scripts
 
 # 3. Match clusters against profiles; flags duplicate/mixed clusters (read-only)
 stt speaker suggest-labels --transcript <session>/transcript.json \
-  --mic <session>/mic.wav --system <session>/system.wav --provider speechbrain --python-backend ./python --helper-script .pi/skills/stt-meeting-recordings/scripts
+  --mic <session>/mic.wav --system <session>/system.wav --provider speechbrain --python-backend ./python --helper-script skills/stt-meeting-recordings/scripts
 
 # 4. Enroll a mixed cluster from only confirmed ranges (never whole-cluster audio)
 stt speaker enroll-ranges "<name>" --transcript <session>/transcript.json \
   --speaker-id <id> --range 12.0-45.0 --range 200.0-240.0 \
-  --mic <session>/mic.wav --system <session>/system.wav --python-backend ./python --helper-script .pi/skills/stt-meeting-recordings/scripts
+  --mic <session>/mic.wav --system <session>/system.wav --python-backend ./python --helper-script skills/stt-meeting-recordings/scripts
 ```
 
 `audit` classifies each cluster as `pure_likely` (safe for whole-cluster enrollment), `mixed_suspected` (unsafe — use `enroll-ranges`), or `unknown` (too little speech). `enroll-ranges` builds a range-limited sample from **only** the requested ranges and records provenance (source session, transcript, track, diarised speaker id, confirmed ranges) on the profile; it never falls back to whole-cluster audio. `enroll-ranges --no-enroll` is a validation-only dry run.
 
-For the turn-by-turn agent workflow (preview → wait for the user's name → enroll → relabel transcript segments by confirmed name while preserving `speaker_id`), the `name_one_speaker.py` helper exposes the same commands plus a guarded `enroll` (which refuses unsafe whole clusters before any audio playback) and a `relabel` command. The helper ships in this repo as part of the bundled Pi skill at `.pi/skills/stt-meeting-recordings/scripts/` (see **Pi agent skill** below). Point the CLI at it with the `STT_HELPER_SCRIPTS` environment variable or the `--helper-script <dir>` option. If neither is set, the `speaker audit` / `purity-preview` / `enroll-ranges` commands fail with an actionable error rather than guessing a location.
+For the turn-by-turn agent workflow (preview → wait for the user's name → enroll → relabel transcript segments by confirmed name while preserving `speaker_id`), the `name_one_speaker.py` helper exposes the same commands plus a guarded `enroll` (which refuses unsafe whole clusters before any audio playback) and a `relabel` command. The helper ships in this repo as part of the bundled agent skill at `skills/stt-meeting-recordings/scripts/` (see **Agent skill** below). Point the CLI at it with the `STT_HELPER_SCRIPTS` environment variable or the `--helper-script <dir>` option. If neither is set, the `speaker audit` / `purity-preview` / `enroll-ranges` commands fail with an actionable error rather than guessing a location.
 
 ## Python backend readiness
 
