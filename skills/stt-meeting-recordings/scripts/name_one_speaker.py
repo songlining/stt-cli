@@ -215,7 +215,7 @@ def speaker_summary_or_die(session: Path, speaker_id: str) -> tuple[dict[str, An
 #
 # These helpers select chronological "windows" of one speaker's useful speech
 # so an agent can play early/middle/late clips and detect mixed-speaker
-# clusters (e.g. Speaker 4, where early segments were one person and late
+# clusters (e.g. ACME Speaker 4, where early segments were one person and late
 # segments another) *before* enrolling a profile from the whole cluster.
 #
 # They are pure functions over transcript segments so they can be unit-tested
@@ -448,7 +448,7 @@ def select_purity_windows(
 #   - "mixed_suspected": useful speech is spread across a wall-clock span that
 #                       is much wider than the speech itself, which is the
 #                       classic signature of two different people collapsed
-#                       into one diarisation id (e.g. Speaker 4).
+#                       into one diarisation id (e.g. ACME Speaker 4).
 #
 # Classification reuses the purity-window selection from task 04: a cluster
 # yields distinct early AND late windows only when it is long enough, and the
@@ -1011,7 +1011,7 @@ def do_purity_preview(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 #
 # The whole-cluster ``enroll`` command can contaminate a speaker profile when
-# a diarisation cluster actually mixes two people (e.g. Speaker 4). The
+# a diarisation cluster actually mixes two people (e.g. ACME Speaker 4). The
 # audit command (task 05) records a per-speaker ``safe_to_enroll_whole_cluster``
 # flag in ``<session>/speaker_audit.json``. This guard consumes that artifact
 # before any backend/profile work and makes one of three decisions:
@@ -2004,9 +2004,9 @@ def do_suggest_labels(args: argparse.Namespace) -> None:
 # Relabeling applies a human-confirmed speaker name to a *subset* of one
 # diarised cluster's segments (selected by speaker id and time ranges),
 # while preserving every original ``speaker_id``, ``source``, timestamp, and
-# text value. This solves the Speaker 4 case where one diarisation cluster
-# actually contained two people (Dana early, Ada late): the agent relabels
-# the early segments to "Dana" and the late segments to "Ada" without
+# text value. This solves the ACME Speaker 4 case where one diarisation cluster
+# actually contained two people (Morgan early, Taylor late): the agent relabels
+# the early segments to "Morgan" and the late segments to "Taylor" without
 # touching ``speaker_id`` -- so a mixed cluster can carry multiple human
 # names after relabeling.
 #

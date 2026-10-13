@@ -2293,12 +2293,12 @@ class AttendeeCaptureTests(VaultTestCase):
 
     def test_parse_attendees_formats(self) -> None:
         parsed = r.parse_attendees(
-            "Sam Rivera <sam.rivera@example.com>, alex.chen@example.com, Dana Vega"
+            "Robin Ellis <robin.ellis@example.com>, taylor.kim@example.com, Morgan Reed"
         )
         self.assertEqual(parsed, [
-            {"name": "Sam Rivera", "address": "sam.rivera@example.com"},
-            {"name": "", "address": "alex.chen@example.com"},
-            {"name": "Dana Vega", "address": ""},
+            {"name": "Robin Ellis", "address": "robin.ellis@example.com"},
+            {"name": "", "address": "taylor.kim@example.com"},
+            {"name": "Morgan Reed", "address": ""},
         ])
 
     def test_parse_attendees_none_or_blank(self) -> None:
@@ -2308,12 +2308,12 @@ class AttendeeCaptureTests(VaultTestCase):
     def test_parse_attendees_commas_inside_brackets_are_not_separators(self) -> None:
         # Exchange "Lastname, First <email>" display names contain commas.
         parsed = r.parse_attendees(
-            "WU, Park <morgan.park@example.com>, Taylor Kim <taylor.kim@example.com>, jordan.lee@example.com"
+            "WU, Park <wuz@example.com>, Jordan Lee <jordan.lee@example.com>, lee.jordan@example.com"
         )
         self.assertEqual(parsed, [
-            {"name": "WU, Park", "address": "morgan.park@example.com"},
-            {"name": "Taylor Kim", "address": "taylor.kim@example.com"},
-            {"name": "", "address": "jordan.lee@example.com"},
+            {"name": "WU, Park", "address": "wuz@example.com"},
+            {"name": "Jordan Lee", "address": "jordan.lee@example.com"},
+            {"name": "", "address": "lee.jordan@example.com"},
         ])
 
     def test_start_persists_attendees_and_source(self) -> None:
@@ -2325,7 +2325,7 @@ class AttendeeCaptureTests(VaultTestCase):
             return real_popen(cmd, *a, **k)
 
         args = self._start_args(
-            title="Example Bank Vault cadence",
+            title="ACME Vault cadence",
             attendees="Alice <alice@example.com>, bob@example.com, Charlie",
             attendees_source="calendar",
         )
@@ -2370,3 +2370,81 @@ class AttendeeCaptureTests(VaultTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WavSilenceDetectionTests(unittest.TestCase):
+    """The stop-time guard: digital silence on all tracks => recording_failed.
+
+    Silence on every track is the signature of TCC-denied capture (recorder
+    launched from an ssh-attributed tree); it must never be finalized as a
+    normal stopped recording.
+    """
+
+    @staticmethod
+    def _write_wav(path, amplitude: int, seconds: float = 0.05, rate: int = 8000) -> None:
+        import math
+        import struct
+        import wave
+
+        n = int(rate * seconds)
+        with wave.open(str(path), "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(rate)
+            frames = b"".join(
+                struct.pack("<h", int(amplitude * math.sin(2 * math.pi * 440 * i / rate))) for i in range(n)
+            )
+            wav.writeframes(frames)
+
+    def test_all_silent_tracks_detected(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            mic, system = Path(td) / "mic.wav", Path(td) / "system.wav"
+            self._write_wav(mic, 0)
+            self._write_wav(system, 2)  # 2 LSB: ffmpeg calls this -91 dB
+            self.assertTrue(r.audio_tracks_are_silent([str(mic), str(system)]))
+
+    def test_any_real_audio_defeats_silence(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            mic, system = Path(td) / "mic.wav", Path(td) / "system.wav"
+            self._write_wav(mic, 0)
+            self._write_wav(system, 2000)
+            self.assertFalse(r.audio_tracks_are_silent([str(mic), str(system)]))
+            # A silent track on its own is still silence; only a track with
+            # real audio defeats the guard.
+            self.assertTrue(r.audio_tracks_are_silent([str(mic)]))
+
+    def test_unreadable_wav_is_not_proven_silent(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            not_wav = Path(td) / "mic.wav"
+            not_wav.write_bytes(b"not a wav")
+            self.assertFalse(r.audio_tracks_are_silent([str(not_wav)]))
+
+    def test_no_wavs_at_all_is_not_silence(self) -> None:
+        self.assertFalse(r.audio_tracks_are_silent([]))
+
+
+class TranscriptAllSilenceTests(unittest.TestCase):
+    """The promotion guard: an all-[Silence] transcript is not a success."""
+
+    def test_all_silence_segments_detected(self) -> None:
+        md = "[0.00 - 300.00] Mic Speaker 0: [Silence]\n[0.00 - 300.00] System Speaker 1: [Silence]\n"
+        js = {"segments": [{"text": "[Silence]"}, {"text": " [Silence] "}]}
+        self.assertTrue(r.transcript_is_all_silence(md, js))
+
+    def test_any_speech_is_not_silence(self) -> None:
+        md = "[0.00 - 12.00] Speaker 0: hello there\n"
+        js = {"segments": [{"text": "[Silence]"}, {"text": "hello there"}]}
+        self.assertFalse(r.transcript_is_all_silence(md, js))
+
+    def test_fallback_to_markdown_without_segments(self) -> None:
+        self.assertTrue(r.transcript_is_all_silence("[0.00 - 5.00] Mic: [Silence]\n", {"segments": []}))
+        self.assertFalse(r.transcript_is_all_silence("[0.00 - 5.00] Mic: real words\n", {"segments": []}))
+
+    def test_validate_staged_outputs_rejects_all_silence(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            staging = Path(td)
+            (staging / "transcript.md").write_text("[0.00 - 300.00] Mic Speaker 0: [Silence]\n")
+            (staging / "transcript.json").write_text(json.dumps({"segments": [{"text": "[Silence]"}]}))
+            ok, reason = r.validate_staged_outputs(staging, None)
+            self.assertFalse(ok)
+            self.assertIn("no speech", reason)

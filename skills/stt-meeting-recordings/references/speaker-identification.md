@@ -94,7 +94,7 @@ stt transcribe-meeting mic.wav system.wav \
 
 (Profiles are read from the default directory `~/Library/Application Support/stt/speakers/`; override with `--identify-profiles-dir` if needed.)
 
-After diarisation+merge, each speaker cluster's embedding is matched against enrolled profiles. Confident matches (above threshold + margin) are relabeled with real names (e.g. `Mic Ada:`); unmatched speakers keep `Speaker N`. If multiple clusters match the same profile, only the highest-confidence cluster receives the name and lower-confidence duplicates remain anonymous with `duplicate_profile_match`; review them with `suggest-labels` rather than assuming they are unknown people. The JSON transcript gains a `speaker_name` field per relabeled segment while `speaker_id` (numeric) is always preserved.
+After diarisation+merge, each speaker cluster's embedding is matched against enrolled profiles. Confident matches (above threshold + margin) are relabeled with real names (e.g. `Mic Alex:`); unmatched speakers keep `Speaker N`. If multiple clusters match the same profile, only the highest-confidence cluster receives the name and lower-confidence duplicates remain anonymous with `duplicate_profile_match`; review them with `suggest-labels` rather than assuming they are unknown people. The JSON transcript gains a `speaker_name` field per relabeled segment while `speaker_id` (numeric) is always preserved.
 
 Flags:
 - `--identify` — enable identification (requires `--diarize`).
@@ -130,6 +130,31 @@ recordings.py transcribe --no-diarize
 
 The manual `stt transcribe-meeting --diarize --identify` commands documented above give you finer control (custom thresholds, profile directories, etc.) but are not needed for normal use.
 
+## Naming clusters without enrolling (read-only path)
+
+Use this when the goal is only to put real names on `Speaker N` clusters — e.g. an internal meeting where profiles don't matter. It mutates **nothing** in the speaker store, so no enrollment guard is required.
+
+1. **`suggest-labels --provider speechbrain --force` first.** One call answers "which enrolled profile is each cluster". Read `<session>/speaker_label_suggestions.json`: `reuse_profile` names, `duplicateClusterGroups`, `mixedClusterWarnings`. Reach for hand-cut clips only if this fails to explain a cluster.
+2. **Expect sub-threshold clusters — that is normal, not a failure.** `recordings.py transcribe` identifies at threshold **0.78** / margin **0.05**, so a genuine attendee with a mediocre embedding stays anonymous on purpose. Real examples from 2026-09-18: two clusters of real invitees (Robin Ellis, Priya Nair) probed at **0.54–0.74** across five separate clips and were all reported unnamed. When the question is *identity* rather than "safe to reuse in future meetings", lower the threshold:
+
+   ```bash
+   python3 scripts/name_one_speaker.py suggest-labels \
+     --session "<session>" --provider speechbrain --threshold 0.5 --force
+   ```
+
+   **Never lower the threshold for enrollment decisions** — only for naming. A 0.5-threshold match is a lead, not a fact: read it back to the user and get confirmation before relabeling.
+3. **`relabel`** (helper-only — see §5) applies the confirmed name to the whole cluster or `--range` slices of it, preserving `speaker_id`; use `--dry-run` first. It is reversible: re-run with a different name.
+
+### Probing with `stt identify` (only when needed)
+
+`stt identify <clip>` gives a targeted second opinion, but several traps make it produce confident nonsense:
+
+- **Verify the clip contains speech before identifying it.** A clip cut from a silent span matches *something* at high confidence. A 2026-09-18 probe returned **"Morgan" 0.854** from a span the transcript marked `[Silence]` (system audio dead 285–585s) and had to be retracted. Check the transcript span first, or measure the clip: `ffmpeg -i clip.wav -af volumedetect -f null -` — a `max_volume` near **−91 dB** is silence.
+- **Cut 30–60s of contiguous speech** from a single cluster. Overlapping or sub-10s clips are worthless.
+- **Below the threshold the result is anonymous.** `stt identify` prints `displayName: "Speaker 0"` with `matchStatus: below_threshold` even when a clear runner-up exists, so the candidate name is invisible until you lower it: `--threshold 0.2` (or your own) makes it print the name. `suggest-labels` is the better tool for the same information.
+- **Probe several spans, never one.** One clip is a single sample: in the same session five clips agreed on one person while the sixth (silent) clip named someone else entirely.
+- **Binary and backend paths.** `stt` is not on `PATH` by default: use `dist/stt.app/Contents/MacOS/stt` or `.build/debug/stt`, and pass `--python-backend <stt-repo>/runtime` (the `runtime/.venv` has SpeechBrain/torchaudio; the ASR venv at `python/.venv` is MLX-only and will fail with "the 'speechbrain' provider requires the optional … packages"). `recordings.py` resolves both itself via `find_stt_bin()`; `STT_BIN` overrides.
+
 ## Safe speaker enrollment (mixed & duplicate clusters)
 
 The one-speaker-at-a-time `enroll` workflow above assumes each diarised cluster is a single, pure speaker. In real meetings that assumption sometimes fails:
@@ -147,7 +172,7 @@ The audit is a heuristic pre-screen, not voice recognition: `safe_to_enroll_whol
 2. **`purity-preview`** — generate and play early/middle/late + best-energy clips for every new whole-cluster candidate, especially suspicious clusters, and ask the user to confirm whether it is one voice or multiple voices. It writes preview artifacts under `.speaker-clips/` but does not modify transcripts or profiles.
 3. **`suggest-labels --provider speechbrain --force`** — match every cluster against real enrolled profiles and flag duplicate/mixed groups. It writes/refreshes `speaker_label_suggestions.json` without modifying transcripts or profiles. Re-run after transcript, diarisation, relabeling, or profile changes. `mfcc-test` is test-only and its embeddings are incompatible with SpeechBrain profiles.
 4. **`enroll-ranges`** (mixed cluster) **or guarded `enroll`** (not flagged + human-confirmed cluster) — use only confirmed ranges for mixed clusters. Treat the guard's `allow` result as permission, not proof of purity.
-5. **`relabel`** — apply a human-confirmed name to selected transcript segments (by speaker id + time ranges), preserving `speaker_id`; use `--dry-run` first.
+5. **`relabel`** — apply a human-confirmed name to selected transcript segments (by speaker id + time ranges), preserving `speaker_id`; use `--dry-run` first. **Helper-only: `name_one_speaker.py relabel` — there is no `stt relabel` subcommand** (see "Naming clusters without enrolling" above for the read-only path).
 
 ### Commands
 
@@ -268,7 +293,7 @@ If the display name already exists, enrollment is **skipped** rather than overwr
 
 #### 5. relabel — apply a confirmed name to transcript segments
 
-`relabel` applies a human-confirmed `speaker_name` to a subset of one cluster's segments (by speaker id + time ranges), **preserving `speaker_id`, `source`, timestamps, and text**. This lets a mixed cluster carry two human names (e.g. the early segments → "Dana", the late segments → "Ada") without changing the underlying diarisation ids.
+`relabel` applies a human-confirmed `speaker_name` to a subset of one cluster's segments (by speaker id + time ranges), **preserving `speaker_id`, `source`, timestamps, and text**. This lets a mixed cluster carry two human names (e.g. the early segments → "Morgan", the late segments → "Taylor") without changing the underlying diarisation ids.
 
 ```bash
 # Dry run — report which segments would change without writing
@@ -299,37 +324,37 @@ The guard's refusal runs **before** any audio playback or `subprocess.run`, so a
 
 ### Worked examples
 
-#### Example A — duplicate clusters (Sam on the system track)
+#### Example A — duplicate clusters (Robin on the system track)
 
-In the validated Example Exchange fixture, Sam appears in system-track `Speaker 1`, `Speaker 3`, and `Speaker 5`. The deterministic regression validated that duplicate grouping; the live `mfcc-test` run could not compare against SpeechBrain profiles, so always run the production-provider command on the actual session before acting.
+In the validated ACME fixture, Robin appears in system-track `Speaker 1`, `Speaker 3`, and `Speaker 5`. The deterministic regression validated that duplicate grouping; the live `mfcc-test` run could not compare against SpeechBrain profiles, so always run the production-provider command on the actual session before acting.
 
 ```bash
 # 1. Refresh suggestions against the existing production profiles
 python3 scripts/name_one_speaker.py suggest-labels \
   --session "<session>" --provider speechbrain --force
-# Proceed only if the result groups Speakers 1, 3, and 5 under Sam's existing profile.
+# Proceed only if the result groups Speakers 1, 3, and 5 under Robin's existing profile.
 
-# 2. Preview each cluster and ask the user to confirm it is Sam
+# 2. Preview each cluster and ask the user to confirm it is Robin
 for id in 1 3 5; do
   python3 scripts/name_one_speaker.py purity-preview \
     --session "<session>" --speaker-id "$id"
 done
 
 # 3. After confirmation, dry-run and then relabel ALL matching clusters.
-# Do not call enroll: the Sam profile already exists.
+# Do not call enroll: the Robin profile already exists.
 for id in 1 3 5; do
   python3 scripts/name_one_speaker.py relabel \
-    --session "<session>" --speaker-id "$id" --name "Sam Rivera" --dry-run
+    --session "<session>" --speaker-id "$id" --name "Robin Ellis" --dry-run
   python3 scripts/name_one_speaker.py relabel \
-    --session "<session>" --speaker-id "$id" --name "Sam Rivera"
+    --session "<session>" --speaker-id "$id" --name "Robin Ellis"
 done
 ```
 
 The lesson: a duplicate group already points to an enrolled profile. Confirm the live SpeechBrain result and the audio, then relabel/merge every matching cluster onto that profile; create no new profile.
 
-#### Example B — mixed cluster (Dana early, Ada late in Speaker 4)
+#### Example B — mixed cluster (Morgan early, Taylor late in Speaker 4)
 
-One diarisation cluster, `Speaker 4`, actually contains two people: Dana speaks early, Ada speaks late. Enrolling the whole cluster would mix two voices into one profile.
+One diarisation cluster, `Speaker 4`, actually contains two people: Morgan speaks early, Taylor speaks late. Enrolling the whole cluster would mix two voices into one profile.
 
 ```bash
 # 1. Force a fresh audit; it raises a conservative risk signal for the cluster
@@ -340,34 +365,34 @@ python3 scripts/name_one_speaker.py audit \
 # 2. Audio-confirm: play early/middle/late clips so the user hears two voices
 python3 scripts/name_one_speaker.py purity-preview \
   --session "<session>" --speaker-id 4
-# User confirms Dana Tamayo at 180.22–184.88 + 200.17–213.32,
-# and Alex Chen at 774.00–818.05.
+# User confirms Morgan Reed at 180.22–184.88 + 200.17–213.32,
+# and Taylor Kim at 774.00–818.05.
 
 # 3. Refresh real-profile suggestions before creating any profile
 python3 scripts/name_one_speaker.py suggest-labels \
   --session "<session>" --provider speechbrain --force
 ```
 
-In the validated Example Exchange session, `Dana Tamayo` and `Alex Chen` profiles already exist, so **do not enroll**. Dry-run both relabels, inspect the changed segment counts, and then apply:
+In the validated ACME session, `Morgan Reed` and `Taylor Kim` profiles already exist, so **do not enroll**. Dry-run both relabels, inspect the changed segment counts, and then apply:
 
 ```bash
 python3 scripts/name_one_speaker.py relabel \
-  --session "<session>" --speaker-id 4 --name "Dana Tamayo" \
+  --session "<session>" --speaker-id 4 --name "Morgan Reed" \
   --range 180.22-184.88 --range 200.17-213.32 --dry-run
 python3 scripts/name_one_speaker.py relabel \
-  --session "<session>" --speaker-id 4 --name "Dana Tamayo" \
+  --session "<session>" --speaker-id 4 --name "Morgan Reed" \
   --range 180.22-184.88 --range 200.17-213.32
 python3 scripts/name_one_speaker.py relabel \
-  --session "<session>" --speaker-id 4 --name "Alex Chen" \
+  --session "<session>" --speaker-id 4 --name "Taylor Kim" \
   --range 774.00-818.05 --dry-run
 python3 scripts/name_one_speaker.py relabel \
-  --session "<session>" --speaker-id 4 --name "Alex Chen" \
+  --session "<session>" --speaker-id 4 --name "Taylor Kim" \
   --range 774.00-818.05
 ```
 
 If a confirmed person has **no** reusable profile in another session, first validate only their ranges with `enroll-ranges ... --no-enroll`; after inspecting the dry-run and obtaining explicit confirmation, rerun without `--no-enroll`. Never enroll when suggestions show an existing profile.
 
-After relabeling, those `transcript.json` segments carry `speaker_name` "Dana Tamayo" / "Alex Chen" while `speaker_id` stays `4` — so a mixed cluster can hold multiple human names without breaking diarisation.
+After relabeling, those `transcript.json` segments carry `speaker_name` "Morgan Reed" / "Taylor Kim" while `speaker_id` stays `4` — so a mixed cluster can hold multiple human names without breaking diarisation.
 
 ### Generated artifacts
 

@@ -22,12 +22,15 @@ Exit codes: 0 = lookup succeeded (found may be false), 1 = lookup failed.
 Output is always one JSON envelope on stdout:
 
     {"ok": true, "found": true,
-     "match": {"status": "current"|"upcoming", "subject": ..., "start": ...,
+     "match": {"status": "current"|"upcoming"|"recently_ended",
+               "subject": ..., "start": ...,
                "end": ..., "duration_seconds": ..., "starts_in_seconds": ...,
                "ends_in_seconds": ..., "location": ..., "organizer": {...},
                "attendees": [{"name": ..., "address": ...}, ...],
                "is_online_meeting": bool,
-               "online_meeting_url": ...|null},
+               "online_meeting_url": ...|null,
+               "max_recording_seconds": <booked end + 30 min grace,
+                                         counted from recorder launch>},
      "next": {...}|null, "now": ...}
     {"ok": true, "found": false, "match": null, "next": {...}|null, "now": ...}
     {"ok": false, "error": {"code": ..., "message": ...}}
@@ -44,6 +47,15 @@ from typing import Any
 DEFAULT_TIMEZONE = "Australia/Sydney"
 DEFAULT_WITHIN_MINUTES = 3
 DEFAULT_DAYS = 1
+# Grace past the booked meeting end before a recording is capped, so an
+# overrunning meeting is still captured but a forgotten recorder does not run
+# all day.
+DEFAULT_GRACE_SECONDS = 1800
+# A meeting that already ended is only treated as a match while enough of the
+# grace is left to be worth recording: below this leftover the recording would
+# be a near-instant auto-stop (and `stt record` rejects a duration <= 0), so we
+# fall back to "no meeting found" (uncapped, user stops it manually).
+MIN_RECENTLY_ENDED_CAP_SECONDS = 300
 CALENDAR_TIMEOUT_SECONDS = 120  # allow for slow auth / auto re-login
 
 
@@ -96,18 +108,21 @@ def select_meeting(
     """Pick (match, next) from calendar events.
 
     match: current meeting (latest-started one wins) else the soonest meeting
-    starting within `within_minutes`. next: first meeting strictly after the
-    match's end (or after now when nothing matched), for context.
-    All-day events are skipped (they are not recordable meetings).
+    starting within `within_minutes` else a meeting that ended less than the
+    grace period ago (it may still be running late). next: first meeting
+    strictly after the match's end (or after now when nothing matched), for
+    context. All-day events are skipped (they are not recordable meetings),
+    as are events with a missing or non-positive duration.
     """
     window = dt.timedelta(minutes=within_minutes)
+    grace = dt.timedelta(seconds=DEFAULT_GRACE_SECONDS)
     parsed: list[tuple[dt.datetime, dt.datetime, dict[str, Any]]] = []
     for ev in events:
         if ev.get("is_all_day"):
             continue
         start = parse_ts(ev.get("start"))
         end = parse_ts(ev.get("end"))
-        if start is None or end is None:
+        if start is None or end is None or end <= start:
             continue
         parsed.append((start, end, ev))
 
@@ -121,6 +136,11 @@ def select_meeting(
         for start, end, ev in parsed
         if start > now and start - now <= window
     ]
+    recently_ended = [
+        (start, end, ev)
+        for start, end, ev in parsed
+        if end <= now and end + grace - now >= dt.timedelta(seconds=MIN_RECENTLY_ENDED_CAP_SECONDS)
+    ]
 
     match: dict[str, Any] | None = None
     if current:
@@ -131,6 +151,8 @@ def select_meeting(
             match["status"] = "current"
             match["starts_in_seconds"] = None
             match["ends_in_seconds"] = int((end - now).total_seconds())
+            # Recorder launches now: cap = booked end + grace from launch.
+            match["max_recording_seconds"] = match["ends_in_seconds"] + DEFAULT_GRACE_SECONDS
         anchor_end = end
     elif upcoming:
         # Soonest upcoming within the window.
@@ -140,13 +162,31 @@ def select_meeting(
             match["status"] = "upcoming"
             match["starts_in_seconds"] = int((start - now).total_seconds())
             match["ends_in_seconds"] = None
+            # The recorder is launched at `start`, and its own duration clock
+            # starts at launch -- so the wait is NOT part of the cap.
+            match["max_recording_seconds"] = match["duration_seconds"] + DEFAULT_GRACE_SECONDS
+        anchor_end = end
+    elif recently_ended:
+        # Latest-ended meeting whose grace has not run out yet (started late,
+        # overran, or the recorder was started after the booked end).
+        start, end, ev = max(recently_ended, key=lambda t: t[1])
+        match = summarize_event(ev, now)
+        if match:
+            match["status"] = "recently_ended"
+            match["starts_in_seconds"] = None
+            match["ends_in_seconds"] = 0  # already past its booked end
+            # Only the leftover grace is left, and the filter above guarantees
+            # it is at least MIN_RECENTLY_ENDED_CAP_SECONDS.
+            match["max_recording_seconds"] = int((end + grace - now).total_seconds())
         anchor_end = end
     else:
         anchor_end = now
 
     nxt: dict[str, Any] | None = None
+    # `anchor_end` can be in the past (recently_ended match), so also require
+    # the event to be in the future -- `next` is context, never a negative wait.
     for start, end, ev in sorted(parsed, key=lambda t: t[0]):
-        if start >= anchor_end:
+        if start >= max(anchor_end, now):
             summary = summarize_event(ev, now)
             if summary:
                 summary["status"] = "next"

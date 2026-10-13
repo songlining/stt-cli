@@ -34,7 +34,7 @@ def event(subject: str, start: str, end: str, **extra) -> dict:
         "start": start,
         "end": end,
         "location": "Microsoft Teams Meeting",
-        "organizer": {"name": "Jane Doe", "address": "organizer@example.com"},
+        "organizer": {"name": "Alex Example", "address": "alex@example.com"},
         "attendees": [
             {"email": {"name": "Alice", "address": "alice@example.com"}, "type": "Required"}
         ],
@@ -63,6 +63,8 @@ class SelectMeetingTests(unittest.TestCase):
         self.assertEqual(match["status"], "current")
         self.assertEqual(match["starts_in_seconds"], None)
         self.assertEqual(match["ends_in_seconds"], 15 * 60)
+        # Cap counts from recorder launch (now) to booked end + 30 min grace.
+        self.assertEqual(match["max_recording_seconds"], 15 * 60 + 30 * 60)
         self.assertEqual(nxt["subject"], "Upcoming review")
         self.assertEqual(nxt["status"], "next")
 
@@ -81,6 +83,9 @@ class SelectMeetingTests(unittest.TestCase):
         self.assertEqual(match["subject"], "Client QBR")
         self.assertEqual(match["status"], "upcoming")
         self.assertEqual(match["starts_in_seconds"], 2 * 60)
+        # Launch is delayed to the booked start and the recorder's own duration
+        # clock starts at launch, so the wait is not part of the cap.
+        self.assertEqual(match["max_recording_seconds"], 58 * 60 + 30 * 60)
 
     def test_upcoming_outside_window_not_matched_but_reported_as_next(self):
         events = [event("Later sync", iso(10, 30), iso(11, 0))]
@@ -102,6 +107,76 @@ class SelectMeetingTests(unittest.TestCase):
         self.assertIsNone(match)
         self.assertIsNone(nxt)
 
+
+class MaxRecordingSecondsTests(unittest.TestCase):
+    """Default auto-stop cap: booked end + 30 min, counted from recorder launch."""
+
+    def test_current_meeting_cap_is_booked_end_plus_grace(self):
+        # Standup 9:00-9:45, now 9:30 -> 15 min left of the meeting + 30 min.
+        events = [event("Standup", iso(9, 0), iso(9, 45))]
+        match, _ = ml.select_meeting(events, NOW, within_minutes=3)
+        self.assertEqual(match["max_recording_seconds"], 15 * 60 + 30 * 60)
+
+    def test_recently_ended_meeting_matched_with_leftover_grace(self):
+        # Over by 10 min: booked end + 30 min grace leaves 20 min.
+        events = [event("Overrunning call", iso(9, 0), iso(9, 20))]
+        match, _ = ml.select_meeting(events, NOW, within_minutes=3)
+        self.assertEqual(match["status"], "recently_ended")
+        self.assertEqual(match["subject"], "Overrunning call")
+        self.assertEqual(match["ends_in_seconds"], 0)
+        self.assertEqual(match["max_recording_seconds"], 20 * 60)
+
+    def test_meeting_ended_exactly_one_grace_ago_not_matched(self):
+        events = [event("Old call", iso(8, 0), iso(9, 0))]
+        match, _ = ml.select_meeting(events, NOW, within_minutes=3)
+        self.assertIsNone(match)
+
+    def test_current_meeting_wins_over_recently_ended_one(self):
+        events = [
+            event("Just ended", iso(9, 0), iso(9, 25)),
+            event("Running now", iso(9, 20), iso(10, 0)),
+        ]
+        match, _ = ml.select_meeting(events, NOW, within_minutes=3)
+        self.assertEqual(match["subject"], "Running now")
+        self.assertEqual(match["max_recording_seconds"], 30 * 60 + 30 * 60)
+
+    def test_recently_ended_match_leaves_next_in_the_future(self):
+        # `next` is context: never an already-ended event with a negative wait.
+        events = [
+            event("Overrunning", iso(9, 0), iso(9, 20)),
+            event("Brief blip", iso(9, 25), iso(9, 28)),
+            event("Later sync", iso(10, 0), iso(10, 30)),
+        ]
+        match, nxt = ml.select_meeting(events, NOW, within_minutes=3)
+        self.assertEqual(match["status"], "recently_ended")
+        self.assertEqual(nxt["subject"], "Later sync")
+        self.assertGreater(nxt["starts_in_seconds"], 0)
+
+    def test_zero_length_and_inverted_events_skipped(self):
+        events = [
+            event("Zero length", iso(9, 25), iso(9, 25)),
+            event("Inverted", iso(9, 40), iso(9, 20)),
+        ]
+        match, nxt = ml.select_meeting(events, NOW, within_minutes=3)
+        self.assertIsNone(match)
+        self.assertIsNone(nxt)
+
+    def test_barely_over_meeting_gets_the_leftover_grace_as_its_cap(self):
+        # Ended 24 min ago -> 6 min of grace left: still a usable cap.
+        events = [event("Barely over", iso(8, 0), iso(9, 6))]
+        match, _ = ml.select_meeting(events, NOW, within_minutes=3)
+        self.assertEqual(match["max_recording_seconds"], 6 * 60)
+
+    def test_too_little_grace_left_is_no_match_not_a_tiny_cap(self):
+        # Ended 27 min ago -> only 3 min of grace left: below the floor, so no
+        # cap at all (a 3-minute guillotine would be worse than recording on).
+        events = [event("Long gone", iso(8, 0), iso(9, 3))]
+        match, nxt = ml.select_meeting(events, NOW, within_minutes=3)
+        self.assertIsNone(match)
+        self.assertIsNone(nxt)
+
+
+class SimpleTests(unittest.TestCase):
     def test_summary_excludes_html_bodies(self):
         ev = event("With body", iso(9, 0), iso(9, 30), body="<html>lots of markup</html>")
         summary = ml.summarize_event(ev, NOW)

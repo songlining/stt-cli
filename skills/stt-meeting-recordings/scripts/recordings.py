@@ -85,7 +85,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_VAULT = Path("~/obsidian-notes")
-STT_REPO = Path(__file__).resolve().parents[4]
+STT_REPO = Path(__file__).resolve().parents[3]  # skills/stt-meeting-recordings/scripts/
 DEFAULT_MODEL = "mlx-community/VibeVoice-ASR-8bit"
 
 LISTS = ["Recording", "To Transcribe", "Transcribed", "Failed / Needs Attention"]
@@ -499,6 +499,87 @@ def assert_audio_not_growing(paths: list[Path], settle_seconds: float | None = N
     return after
 
 
+SILENCE_PEAK_THRESHOLD = 32  # of 32768 full scale (~-60 dBFS); digital silence is 0-2 LSB
+
+
+def wav_peak_amplitude(path: Path, scan_chunk_frames: int = 1 << 16) -> int | None:
+    """Peak absolute sample amplitude of a WAV file, or None if unreadable.
+
+    Pure-stdlib chunked scan (wave + array), so it works on multi-hundred-MB
+    meeting tracks without loading them into memory and without requiring
+    ffmpeg. Digital silence (TCC-denied capture) peaks at 0-2 LSB; any real
+    microphone or system audio peaks orders of magnitude above that.
+    """
+    try:
+        import wave
+
+        with wave.open(str(path), "rb") as wav:
+            width = wav.getsampwidth()
+            if width != 2:  # only 16-bit PCM tracks are produced by stt record
+                return None
+            peak = 0
+            import array
+
+            while True:
+                frames = wav.readframes(scan_chunk_frames)
+                if not frames:
+                    break
+                samples = array.array("h")
+                samples.frombytes(frames)
+                for s in samples:
+                    a = s if s >= 0 else -s
+                    if a > peak:
+                        peak = a
+                        if peak > SILENCE_PEAK_THRESHOLD:
+                            return peak
+            return peak
+    except Exception:
+        return None
+
+
+def audio_tracks_are_silent(paths: list[str]) -> bool:
+    """True when at least one WAV exists and every one of them is digital
+    silence. A single non-silent track (or any unreadable/indeterminate
+    track) means "not proven silent" -- this guard only fires on certainty.
+    """
+    wav_paths = [Path(p) for p in paths if str(p).endswith(".wav")]
+    if not wav_paths:
+        return False
+    for path in wav_paths:
+        peak = wav_peak_amplitude(path)
+        if peak is None or peak > SILENCE_PEAK_THRESHOLD:
+            return False
+    return True
+
+
+def transcript_is_all_silence(md_text: str, json_data: Any) -> bool:
+    """True when a transcript carries no speech: every segment's text is
+    empty or a bare ``[Silence]``-style tag (optionally with whitespace or
+    a speaker prefix). Mirrors the skill's existing definition of a
+    "substantive" transcript for cleanup purposes; used to refuse promoting
+    an all-silence run as a successful transcription.
+    """
+    segments: list[Any]
+    if isinstance(json_data, dict):
+        segments = json_data.get("segments") or []
+    elif isinstance(json_data, list):
+        segments = json_data
+    else:
+        segments = []
+    if not segments:
+        # No structured segments: fall back to the Markdown. If it has any
+        # content beyond silence tags, it is not all-silence.
+        lines = [ln.strip() for ln in md_text.splitlines() if ln.strip()]
+        return not any(ln for ln in lines if not ln.endswith("[Silence]"))
+    for seg in segments:
+        if not isinstance(seg, dict):
+            return False
+        text = str(seg.get("text") or "").strip()
+        if text and not text.endswith("[Silence]"):
+            return False
+    return True
+
+
 def validate_transcript_json_shape(data: Any) -> bool:
     """True if `data` has the expected transcript JSON shape.
 
@@ -547,6 +628,12 @@ def validate_staged_outputs(staging_dir: Path, track_pair: tuple[Path, Path] | N
         return False, f"{js.name} is not valid JSON: {e}"
     if not validate_transcript_json_shape(data):
         return False, f"{js.name} does not have the expected shape (dict with a 'segments' list, or a top-level list)"
+    if transcript_is_all_silence(md.read_text(encoding="utf-8", errors="replace"), data):
+        return False, (
+            "transcript contains no speech (every segment is empty or [Silence]); this is the signature of "
+            "an audio capture that was denied (e.g. microphone/system-audio permission for the launching "
+            "process) -- refusing to promote it as a successful transcription"
+        )
     return True, ""
 
 
@@ -1058,10 +1145,33 @@ def best_audio_for_transcription(session: dict[str, Any]) -> Path:
 
 
 def finalize_stopped_session(session: dict[str, Any], vault: Path) -> dict[str, Any]:
-    """Persist a recording as stopped after an explicit or natural process exit."""
+    """Persist a recording as stopped after an explicit or natural process exit.
+
+    If every produced audio track is digital silence, the session is instead
+    marked `recording_failed`: silence on all tracks is the signature of a
+    TCC-denied capture (e.g. recorder launched from an ssh-attributed process
+    tree), and finalizing it as a normal stopped recording would let a
+    worthless all-silence transcript be produced (and, before the promotion
+    guard existed, even filed as `transcribed`).
+    """
+    stop_live_captions(Path(session["session_dir"]))
     with VaultLock(vault):
-        session["status"] = "stopped"
         audio_files = discover_audio_files(session)
+        if audio_files and audio_tracks_are_silent(audio_files):
+            session["audio_files"] = audio_files
+            if not session.get("ended_at"):
+                session["ended_at"] = iso_now()
+                session["ended_at_human"] = now_human()
+            return mark_recording_failed(
+                session,
+                vault,
+                session.get("recording_reservation_id"),
+                "all audio tracks are digital silence -- capture was denied "
+                "(check microphone/system-audio permission for the process that launched "
+                "the recorder; recordings started from ssh-attributed sessions are denied "
+                "by macOS without a prompt)",
+            )
+        session["status"] = "stopped"
         session["audio_files"] = audio_files
         if not session.get("ended_at"):
             if audio_files:
@@ -1505,6 +1615,89 @@ def launch_duration_monitor(session: dict[str, Any], duration: float | None) -> 
         )
 
 
+LIVE_CAPTIONS_PYTHON = Path.home() / "models" / "venv-mlx-audio" / "bin" / "python"
+LIVE_CAPTIONS_SCRIPT = Path.home() / "models" / "live_asr.py"
+# 1.5B is the sidecar model (2.8GB, battery-friendly); override with
+# STT_LIVE_CAPTIONS_MODEL=<path> for another checkpoint.
+LIVE_CAPTIONS_MODEL = Path.home() / "models" / "vibevoice-asr-streaming-1.5b-mlx-8bit"
+
+
+def live_captions_enabled(args: argparse.Namespace) -> bool:
+    """Live captions are opt-in: the streaming model costs GPU/RAM on every
+    recording. Enable with `--live-captions` or `STT_LIVE_CAPTIONS=1`;
+    `STT_NO_LIVE_CAPTIONS=1` force-disables."""
+    if os.environ.get("STT_NO_LIVE_CAPTIONS"):
+        return False
+    return bool(getattr(args, "live_captions", False) or os.environ.get("STT_LIVE_CAPTIONS"))
+
+
+def live_captions_model() -> str:
+    return os.environ.get("STT_LIVE_CAPTIONS_MODEL") or str(LIVE_CAPTIONS_MODEL)
+
+
+def launch_live_captions(session: dict[str, Any]) -> int | None:
+    """Best-effort MLX streaming-captions sidecar, launched together with the
+    recorder so in-meeting captions are available (see
+    references/live-captions.md). Never blocks or fails the recording: skipped
+    when capture has no mic feed (`system` mode), when the model stack is
+    missing, or when disabled via `STT_NO_LIVE_CAPTIONS`. Returns the sidecar
+    PID, or None when skipped.
+    """
+    if session.get("mode") == "system":
+        return None
+    session_dir = Path(session["session_dir"])
+    model = live_captions_model()
+    if not (LIVE_CAPTIONS_PYTHON.exists() and LIVE_CAPTIONS_SCRIPT.exists() and Path(model).exists()):
+        return None
+    try:
+        proc = subprocess.Popen(
+            [
+                str(LIVE_CAPTIONS_PYTHON),
+                str(LIVE_CAPTIONS_SCRIPT),
+                "--model", model,
+                "--text", str(session_dir / "live-captions.txt"),
+                "--srt", str(session_dir / "live-captions.srt"),
+                # live_asr.py self-exits after `--seconds` (default 45!); a
+                # day-long cap makes the sidecar outlive any meeting.
+                "--seconds", "86400",
+            ],
+            stdout=(session_dir / "live-captions.log").open("ab"),
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    except OSError:
+        return None
+    (session_dir / ".live-captions.pid").write_text(f"{proc.pid}\n")
+    return proc.pid
+
+
+def stop_live_captions(session_dir: Path) -> None:
+    """Best-effort shutdown of a recording's live-captions sidecar (SIGTERM,
+    escalating to SIGKILL). No-op when no sidecar was launched."""
+    pid_file = Path(session_dir) / ".live-captions.pid"
+    if not pid_file.exists():
+        return
+    try:
+        pid = int(pid_file.read_text().strip() or 0)
+    except (ValueError, OSError):
+        pid = 0
+    pid_file.unlink(missing_ok=True)
+    if not pid or not process_alive(pid):
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    deadline = time.time() + 5.0
+    while time.time() < deadline and process_alive(pid):
+        time.sleep(0.25)
+    if process_alive(pid):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
 def wait_for_recording_to_finish(session: dict[str, Any], vault: Path, max_wait: float | None, proc: subprocess.Popen[Any] | None = None) -> dict[str, Any]:
     pid = int(session.get("pid", 0) or 0)
     if proc is not None:
@@ -1723,7 +1916,6 @@ def interruptible_wait(seconds: float, cancel_check=None) -> bool:
         if signals_overridden:
             signal.signal(signal.SIGINT, previous_sigint)
             signal.signal(signal.SIGTERM, previous_sigterm)
-
 
 def start(args: argparse.Namespace) -> None:
     vault = vault_path()
@@ -1994,6 +2186,9 @@ def start(args: argparse.Namespace) -> None:
             # right at unblock time after that persistence had already
             # completed either way -- the recording is tracked normally, so
             # report it as started rather than losing track of it.
+            live_captions_pid = None
+            if live_captions_enabled(args):
+                live_captions_pid = launch_live_captions(session)
             print(
                 json.dumps(
                     {
@@ -2006,6 +2201,7 @@ def start(args: argparse.Namespace) -> None:
                         "board": str(board_path(vault)),
                         "log": str(log_path),
                         "transcribing": False,
+                        "live_captions_pid": live_captions_pid,
                     },
                     indent=2,
                 )
@@ -2014,6 +2210,9 @@ def start(args: argparse.Namespace) -> None:
         restore_signals()
         log.close()
 
+        live_captions_pid = None
+        if live_captions_enabled(args):
+            live_captions_pid = launch_live_captions(session)
         launch_duration_monitor(session, args.duration)
         rebuild_board(vault)
 
@@ -2026,6 +2225,7 @@ def start(args: argparse.Namespace) -> None:
         "board": str(board_path(vault)),
         "log": str(log_path),
         "transcribing": False,
+        "live_captions_pid": live_captions_pid,
     }
     if not args.wait:
         print(json.dumps(started_payload, indent=2))
@@ -2970,6 +3170,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Where the attendee list came from (calendar lookup vs manually provided); recorded for provenance.",
     )
     p.add_argument("--mode", choices=["meeting", "mic", "system"], default="meeting")
+    p.add_argument("--live-captions", dest="live_captions", action="store_true", default=False,
+                   help="Enable the best-effort live-captions sidecar (off by default; also STT_LIVE_CAPTIONS=1)")
     p.add_argument("--duration", type=float, default=None, help="Optional finite recording duration in seconds")
     p.add_argument(
         "--start-at",

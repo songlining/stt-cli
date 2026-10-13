@@ -3,7 +3,7 @@
   "evals": [
     {
       "id": 1,
-      "prompt": "Start recording my meeting with Acme Bank about Vault PKI. Don't transcribe yet.",
+      "prompt": "Start recording my meeting with ACME about Vault PKI. Don't transcribe yet.",
       "expected_output": "Runs the Outlook calendar meeting lookup (scripts/meeting_lookup.py, wrapping the outlook-cli skill) to identify the current/forthcoming meeting; titles the recording after the real meeting when one matches (falling back to the user-provided title otherwise). Starts a background stt recording in meeting mode, creates an Obsidian session folder and meeting recordings kanban card, and explicitly confirms transcription was not started.",
       "files": []
     },
@@ -40,7 +40,13 @@
     {
       "id": 7,
       "prompt": "Record this meeting for 45 minutes, then transcribe, distill, file, update the latest meeting notes and remove the wav files.",
-      "expected_output": "Resolves the meeting title via the Outlook calendar lookup (scripts/meeting_lookup.py) and honors the user's explicit duration. Starts a meeting-mode recording with --duration 2700 --wait (auto-stop after 45 minutes, no separate stop needed) and reports start details; once the recorder exits and the kanban card is in To Transcribe, transcribes the session with a generous harness timeout (at least 10800s, scaled for long meetings) and waits for a transcribed outcome; distills transcript.md into <session>/summary.md; files and updates the customer's latest meeting notes by appending a dated section to raw/HashiCorp/customers/<Customer>/<series>.md only when a matching customer note exists -- skipping that step entirely (without inventing a folder) and noting the skip if none matches; then always removes the session's own top-level .wav files to macOS Trash after verifying recording and transcription are inactive and the transcript is substantive, updating metadata.json and session.md while keeping the kanban card in Transcribed. Reports each stage as it completes.",
+      "expected_output": "Resolves the meeting title via the Outlook calendar lookup (scripts/meeting_lookup.py) and honors the user's explicit duration. Starts a meeting-mode recording with --duration 2700 --wait (auto-stop after 45 minutes, no separate stop needed) and reports start details; once the recorder exits and the kanban card is in To Transcribe, transcribes the session with a generous harness timeout (at least 10800s, scaled for long meetings) and waits for a transcribed outcome; distills transcript.md into <session>/summary.md; files and updates the customer's latest meeting notes by appending a dated section to customers/<Customer>/<series>.md only when a matching customer note exists -- skipping that step entirely (without inventing a folder) and noting the skip if none matches; then always removes the session's own top-level .wav files to macOS Trash after verifying recording and transcription are inactive and the transcript is substantive, updating metadata.json and session.md while keeping the kanban card in Transcribed. Reports each stage as it completes.",
+      "files": []
+    },
+    {
+      "id": 8,
+      "prompt": "Record this meeting for me (I'm in it right now) but don't transcribe anything.",
+      "expected_output": "Runs scripts/meeting_lookup.py, then starts the recording with --duration set to the matched meeting's max_recording_seconds (booked calendar end + 30 min grace) and no --wait, so the recorder stops itself at that cap and the detached monitor finalizes the session (card -> To Transcribe) without the agent holding the call. Passes the matched attendees as the speaker whitelist, reports the cap time (e.g. 'stops itself at 14:00 = booked 13:30 + 30 min'), and explicitly confirms transcription was not started and that the cap never starts transcription. If no meeting matched, records with no cap and says it will run until the user says stop.",
       "files": []
     }
   ]
