@@ -48,6 +48,18 @@
       "prompt": "Record this meeting for me (I'm in it right now) but don't transcribe anything.",
       "expected_output": "Runs scripts/meeting_lookup.py, then starts the recording with --duration set to the matched meeting's max_recording_seconds (booked calendar end + 30 min grace) and no --wait, so the recorder stops itself at that cap and the detached monitor finalizes the session (card -> To Transcribe) without the agent holding the call. Passes the matched attendees as the speaker whitelist, reports the cap time (e.g. 'stops itself at 14:00 = booked 13:30 + 30 min'), and explicitly confirms transcription was not started and that the cap never starts transcription. If no meeting matched, records with no cap and says it will run until the user says stop.",
       "files": []
+    },
+    {
+      "id": 9,
+      "prompt": "Record this call for me, but don't check my calendar or Outlook.",
+      "expected_output": "Skips `scripts/meeting_lookup.py` entirely (the user opted out of the calendar), then starts the recording with --duration set to the fallback cap: STT_DEFAULT_MAX_RECORDING_SECONDS when it is a positive integer of at least 60, otherwise 5400 (90 min), and no --wait in either case, so the recorder stops itself at that cap and the detached monitor finalizes the session. Titles the session from the user's words (falling back to 'Untitled recording'), states that with no invite list there is no attendee whitelist to check Speaker N clusters against, reports the cap time, and confirms transcription has not been started. It must not present the fallback cap as calendar-derived, and must never pass a zero, negative or non-numeric duration.",
+      "files": []
+    },
+    {
+      "id": 10,
+      "prompt": "Outlook isn't responding. Just record this call for me.",
+      "expected_output": "This is NOT the no-calendar opt-out (the user did not ask to skip the calendar; the calendar simply failed). Re-runs the lookup once first, as the skill requires for a transient failure; if it still fails or returns found:false, treats it as no meeting found and starts the recording with NO --duration and no --wait, i.e. no cap, and says in the start report that it will keep recording until the user says stop. It must not substitute the 90-minute fallback cap unless the user explicitly asks not to check the calendar.",
+      "files": []
     }
   ]
 }
